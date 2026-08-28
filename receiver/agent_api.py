@@ -388,7 +388,19 @@ def build_agent_context(
         "SELECT COUNT(*) AS count FROM normalization_jobs WHERE status IN ('pending','running')"
     )[0]["count"]
     gaps = database.fetch_all(
-        "SELECT COUNT(*) AS count FROM ingest_batches WHERE gap_detected=1"
+        """SELECT COUNT(*) AS count
+           FROM ingest_batches AS current
+           WHERE current.status='committed'
+             AND current.sequence > 1
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM ingest_batches AS previous
+                 WHERE previous.status='committed'
+                   AND previous.owner_id = current.owner_id
+                   AND previous.device_id = current.device_id
+                   AND previous.sequence = current.sequence - 1
+                   AND previous.batch_id = current.previous_batch_id
+             )"""
     )[0]["count"]
     today = datetime.now(timezone).date()
     projection_status = jobs[0]["status"] if jobs else ("completed" if run else "unavailable")

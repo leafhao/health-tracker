@@ -539,7 +539,21 @@ def mount_dashboard(
                 ),
                 "batches": database.fetch_all(
                     """SELECT COUNT(*) AS total,
-                              SUM(CASE WHEN gap_detected=1 THEN 1 ELSE 0 END) AS gaps,
+                              (
+                                  SELECT COUNT(*)
+                                  FROM ingest_batches AS current
+                                  WHERE current.status='committed'
+                                    AND current.sequence > 1
+                                    AND NOT EXISTS (
+                                        SELECT 1
+                                        FROM ingest_batches AS previous
+                                        WHERE previous.status='committed'
+                                          AND previous.owner_id = current.owner_id
+                                          AND previous.device_id = current.device_id
+                                          AND previous.sequence = current.sequence - 1
+                                          AND previous.batch_id = current.previous_batch_id
+                                    )
+                              ) AS gaps,
                               MAX(committed_at) AS last_committed_at
                        FROM ingest_batches WHERE status='committed'"""
                 )[0],
