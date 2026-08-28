@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -81,6 +82,20 @@ def load_or_create_identity(
     paths: AppPaths, database: Database, owner_id: str = "owner-default"
 ) -> ReceiverIdentity:
     paths.ensure()
+    # Keep the ephemeral lock outside keys/: portable backups intentionally copy
+    # only persistent JSON key material from that directory.
+    lock_path = paths.root / ".receiver-identity.initialize.lock"
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            return _load_or_create_identity_unlocked(paths, database, owner_id)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _load_or_create_identity_unlocked(
+    paths: AppPaths, database: Database, owner_id: str
+) -> ReceiverIdentity:
     active = database.fetch_all(
         "SELECT * FROM receiver_keys WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1"
     )

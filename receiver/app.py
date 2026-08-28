@@ -39,6 +39,12 @@ from .retention import configured_retention_days
 from .settings import AppPaths
 from .sync_crypto import EnvelopeError, peek_header
 from .v2_ingestion import BatchIngestionService, IngestionError
+from .worker import (
+    CLOUD_RELAY_WORKER,
+    NORMALIZATION_WORKER,
+    heartbeat_age_seconds,
+    worker_heartbeat,
+)
 
 
 MAX_DIRECT_PACK_ENVELOPES = 128
@@ -121,6 +127,7 @@ def create_app(
     bonjour = BonjourPublisher(identity)
     cloud_bootstrap_store = CloudBootstrapStore(paths, batch_ingestion)
     cloud_relay_enabled = os.environ.get("HEALTH_RECEIVER_DISABLE_CLOUD_RELAY") != "1"
+    external_workers = os.environ.get("HEALTH_RECEIVER_WORKERS_EXTERNAL") == "1"
     runtime_status: dict[str, Any] = {
         "started_monotonic": time.monotonic(),
         "normalization_heartbeat": time.monotonic(),
@@ -186,10 +193,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        normalization_task = asyncio.create_task(normalization_loop())
+        normalization_task = (
+            None if external_workers else asyncio.create_task(normalization_loop())
+        )
         cloud_relay_task = (
             None
-            if not cloud_relay_enabled
+            if not cloud_relay_enabled or external_workers
             else asyncio.create_task(cloud_relay_loop())
         )
         try:
@@ -202,11 +211,13 @@ def create_app(
             yield
         finally:
             bonjour.stop()
-            normalization_task.cancel()
+            if normalization_task is not None:
+                normalization_task.cancel()
             if cloud_relay_task is not None:
                 cloud_relay_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await normalization_task
+            if normalization_task is not None:
+                with suppress(asyncio.CancelledError):
+                    await normalization_task
             if cloud_relay_task is not None:
                 with suppress(asyncio.CancelledError):
                     await cloud_relay_task
@@ -221,6 +232,7 @@ def create_app(
     app.state.bonjour = bonjour
     app.state.cloud_bootstrap_store = cloud_bootstrap_store
     app.state.runtime_status = runtime_status
+    app.state.external_workers = external_workers
 
     @app.get("/api/v1/healthbeat/health")
     def health() -> dict[str, Any]:
@@ -240,14 +252,25 @@ def create_app(
         PRAGMA quick_check and portable backup verification.
         """
         _require_local_agent(request)
-        now = time.monotonic()
-        normalization_age = now - float(runtime_status["normalization_heartbeat"])
-        cloud_age = now - float(runtime_status["cloud_relay_heartbeat"])
+        if external_workers:
+            normalization_row = worker_heartbeat(database, NORMALIZATION_WORKER)
+            cloud_row = worker_heartbeat(database, CLOUD_RELAY_WORKER)
+            normalization_age = heartbeat_age_seconds(normalization_row)
+            cloud_age = heartbeat_age_seconds(cloud_row)
+        else:
+            now = time.monotonic()
+            normalization_row = None
+            cloud_row = None
+            normalization_age = now - float(runtime_status["normalization_heartbeat"])
+            cloud_age = now - float(runtime_status["cloud_relay_heartbeat"])
         failures: list[str] = []
         try:
             database.fetch_all("SELECT 1 AS ok")
             pending = database.fetch_all(
                 "SELECT COUNT(*) AS count FROM normalization_jobs WHERE status IN ('pending','running')"
+            )[0]["count"]
+            pending_snapshots = database.fetch_all(
+                "SELECT COUNT(*) AS count FROM dashboard_snapshot_jobs"
             )[0]["count"]
             # `gap_detected` records what was missing when a batch first arrived.
             # Background/relay uploads may arrive out of order, so that historical
@@ -268,19 +291,47 @@ def create_app(
         except Exception as exc:
             database_ok = False
             pending = None
+            pending_snapshots = None
             gaps = None
             failures.append(f"database unavailable: {type(exc).__name__}")
-        if normalization_age > 600:
+        if normalization_age is None or normalization_age > 600:
             failures.append("normalization worker heartbeat is stale")
-        if cloud_relay_enabled and cloud_age > 600:
+        if normalization_row and normalization_row.get("status") in {"error", "stopped"}:
+            failures.append(
+                f"normalization worker is {normalization_row['status']}: "
+                f"{normalization_row.get('last_error') or 'no detail'}"
+            )
+        if cloud_relay_enabled and (cloud_age is None or cloud_age > 600):
             failures.append("cloud relay heartbeat is stale")
+        if (
+            cloud_relay_enabled
+            and cloud_row
+            and cloud_row.get("status") in {"error", "stopped"}
+        ):
+            failures.append(
+                f"cloud relay worker is {cloud_row['status']}: "
+                f"{cloud_row.get('last_error') or 'no detail'}"
+            )
         payload = {
             "status": "ready" if not failures else "not_ready",
             "database": "ok" if database_ok else "unavailable",
-            "normalization_worker_heartbeat_age_seconds": round(normalization_age, 3),
+            "normalization_worker_heartbeat_age_seconds": (
+                round(normalization_age, 3) if normalization_age is not None else None
+            ),
+            "normalization_worker_status": (
+                normalization_row.get("status") if normalization_row else "embedded"
+            ),
             "cloud_relay": "enabled" if cloud_relay_enabled else "disabled",
-            "cloud_relay_heartbeat_age_seconds": round(cloud_age, 3) if cloud_relay_enabled else None,
+            "cloud_relay_heartbeat_age_seconds": (
+                round(cloud_age, 3)
+                if cloud_relay_enabled and cloud_age is not None
+                else None
+            ),
+            "cloud_relay_worker_status": (
+                cloud_row.get("status") if cloud_row else ("embedded" if cloud_relay_enabled else "disabled")
+            ),
             "pending_normalization_jobs": pending,
+            "pending_dashboard_snapshots": pending_snapshots,
             "sequence_gaps": gaps,
             "failures": failures,
         }

@@ -14,18 +14,13 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .access_control import AccessControl, AccessControlError
+from .dashboard_materializer import (
+    build_day_snapshot,
+    load_data_availability,
+    load_day_snapshot,
+)
 from .database import Database
 from .identity import ReceiverIdentity
-from .normalizer import (
-    HEART_RATE_RECOVERY,
-    HEART_RATE,
-    HRV,
-    OXYGEN_SATURATION,
-    RESPIRATORY_RATE,
-    RESTING_HEART_RATE,
-    SLEEPING_WRIST_TEMPERATURE,
-    VO2_MAX,
-)
 from .settings import AppPaths
 
 
@@ -332,56 +327,7 @@ def _dashboard_insights(
 
 
 def _data_availability(database: Database) -> dict[str, Any]:
-    tracked = {
-        "heart_rate": HEART_RATE,
-        "resting_heart_rate": RESTING_HEART_RATE,
-        "hrv": HRV,
-        "oxygen_saturation": OXYGEN_SATURATION,
-        "respiratory_rate": RESPIRATORY_RATE,
-        "vo2_max": VO2_MAX,
-        "heart_rate_recovery": HEART_RATE_RECOVERY,
-        "sleeping_wrist_temperature": SLEEPING_WRIST_TEMPERATURE,
-    }
-    placeholders = ", ".join("?" for _ in tracked)
-    rows = database.fetch_all(
-        f"""SELECT type, COUNT(*) AS records, MIN(start_date) AS first_sample,
-                    MAX(end_date) AS last_sample
-             FROM quantity_samples WHERE type IN ({placeholders}) GROUP BY type""",
-        tuple(tracked.values()),
-    )
-    by_type = {row["type"]: row for row in rows}
-    reports = database.fetch_all(
-        """SELECT device_id, app_version, platform_version, health_data_available,
-                  health_permissions_requested, supported_quantity_types_json,
-                  supported_domains_json, reported_at
-           FROM device_capabilities ORDER BY reported_at DESC"""
-    )
-    decoded_reports: list[dict[str, Any]] = []
-    supported_union: set[str] = set()
-    for report in reports:
-        item = dict(report)
-        for source, target in (
-            ("supported_quantity_types_json", "supported_quantity_types"),
-            ("supported_domains_json", "supported_domains"),
-        ):
-            raw = item.pop(source, "[]")
-            try:
-                item[target] = json.loads(raw)
-            except (TypeError, json.JSONDecodeError):
-                item[target] = []
-        supported_union.update(item["supported_quantity_types"])
-        decoded_reports.append(item)
-    permissions_requested = any(bool(item["health_permissions_requested"]) for item in decoded_reports)
-    output: dict[str, Any] = {}
-    for key, type_id in tracked.items():
-        item = dict(by_type.get(type_id, {"records": 0, "first_sample": None, "last_sample": None}))
-        item["support_status"] = (
-            "unknown" if not decoded_reports else ("supported" if type_id in supported_union else "unsupported")
-        )
-        item["permissions_requested"] = permissions_requested
-        output[key] = item
-    output["device_reports"] = decoded_reports
-    return output
+    return load_data_availability(database)
 
 
 def _available_dates(database: Database) -> dict[str, str | None]:
@@ -584,50 +530,6 @@ def mount_dashboard(
             ZoneInfo(timezone_name)
         except Exception as exc:
             raise HTTPException(status_code=400, detail="invalid timezone") from exc
-        daily_rows = database.fetch_all(
-            "SELECT * FROM normalized_daily_summaries WHERE timezone = ? AND date = ?",
-            (timezone_name, target_date.isoformat()),
-        )
-        sleep_rows = database.fetch_all(
-            "SELECT * FROM normalized_sleep_summaries WHERE timezone = ? AND date = ?",
-            (timezone_name, target_date.isoformat()),
-        )
-        training_rows = database.fetch_all(
-            "SELECT * FROM normalized_training_summaries WHERE timezone = ? AND date = ?",
-            (timezone_name, target_date.isoformat()),
-        )
-        workout_rows = database.fetch_all(
-            """SELECT * FROM normalized_workouts
-               WHERE timezone = ? AND date = ? ORDER BY start_date""",
-            (timezone_name, target_date.isoformat()),
-        )
-        for workout in workout_rows:
-            raw_preview = workout.pop("route_preview_json", "[]")
-            raw_zones = workout.pop("heart_rate_zones_json", "{}")
-            try:
-                workout["route_preview"] = json.loads(raw_preview) if raw_preview else []
-            except (TypeError, json.JSONDecodeError):
-                workout["route_preview"] = []
-            try:
-                workout["heart_rate_zones"] = json.loads(raw_zones) if raw_zones else {}
-            except (TypeError, json.JSONDecodeError):
-                workout["heart_rate_zones"] = {}
-        minute_rows = database.fetch_all(
-            """SELECT minute, type, value, min_value, max_value, sample_count, unit, source_name
-               FROM normalized_quantity_minutes
-               WHERE timezone = ? AND date = ? AND type = ?
-               ORDER BY minute""",
-            (timezone_name, target_date.isoformat(), HEART_RATE),
-        )
-        heart_rate = minute_rows
-        sleep_window = sleep_rows[0] if sleep_rows else None
-        sleep_segments: list[dict[str, Any]] = []
-        if sleep_window:
-            raw_segments = sleep_window.pop("segments_json", "[]")
-            try:
-                sleep_segments = json.loads(raw_segments) if raw_segments else []
-            except (TypeError, json.JSONDecodeError):
-                sleep_segments = []
         run_rows = database.fetch_all(
             "SELECT normalized_at FROM normalization_runs WHERE timezone = ? AND date = ?",
             (timezone_name, target_date.isoformat()),
@@ -640,29 +542,28 @@ def mount_dashboard(
         projection_status = job_rows[0]["status"] if job_rows else (
             "completed" if run_rows else "unavailable"
         )
-        daily_row = daily_rows[0] if daily_rows else None
-        decoded_sleep = _decode_sources(sleep_window)
-        training_row = training_rows[0] if training_rows else None
-        return {
-            "date": target_date.isoformat(),
-            "timezone": timezone_name,
-            "daily": daily_row,
-            "sleep": decoded_sleep,
-            "sleep_segments": sleep_segments,
-            "workouts": workout_rows,
-            "training": training_row,
-            "heart_rate": heart_rate,
-            "quantity_minutes": minute_rows,
-            "insights": _dashboard_insights(
-                database, target_date, timezone_name, daily_row, decoded_sleep, training_row
-            ),
-            "availability": _data_availability(database),
-            "projection": {
-                "available": bool(run_rows),
-                "status": projection_status,
-                "normalized_at": run_rows[0]["normalized_at"] if run_rows else None,
-            },
+        payload = load_day_snapshot(database, target_date, timezone_name)
+        if payload is None:
+            live = build_day_snapshot(database, target_date, timezone_name)
+            payload = live[0] if live else {
+                "date": target_date.isoformat(),
+                "timezone": timezone_name,
+                "daily": None,
+                "sleep": None,
+                "sleep_segments": [],
+                "workouts": [],
+                "training": None,
+                "heart_rate": [],
+                "quantity_minutes": [],
+                "insights": {},
+            }
+        payload["availability"] = _data_availability(database)
+        payload["projection"] = {
+            "available": bool(run_rows),
+            "status": projection_status,
+            "normalized_at": run_rows[0]["normalized_at"] if run_rows else None,
         }
+        return payload
 
     @app.get("/api/v1/dashboard/trends", include_in_schema=False)
     def dashboard_trends(

@@ -152,8 +152,11 @@ health_server/
 首版仍可由一个安装包提供，但运行时分为：
 
 - `health-api`：只服务 API 和前端。
-- `health-worker`：轮询对象存储、解密入库、执行规整任务。
+- `health-normalizer`：执行规整任务，并刷新受影响日期的完整面板快照与全局数据可用性快照。
+- `health-cloud-relay`：轮询对象存储、验证密文、解密并幂等入库。
 - `health-maintenance`：备份、完整性检查和保留策略。
+
+开发环境为方便调试可以让 API 内嵌两个后台循环；macOS/Linux 正式安装始终使用独立进程。各进程共享同机 SQLite WAL，不把 SQLite 放到网络文件系统，也不允许多台 Receiver 同时写入。
 
 ### 5.1 接收状态机
 
@@ -174,6 +177,7 @@ SQLite 仍是个人单用户部署的默认选择：无需数据库服务、备�
 2. **原始层**：raw_events、quantity_samples、category_samples、workouts、route_points、activity_summaries、tombstones。
 3. **规范层**：minute_metrics、daily_metrics、sleep_sessions、sleep_stages、normalized_workouts、workout_metrics、route_summaries。
 4. **分析层**：heart_rate_zones、training_load、baselines、anomalies。只保存可解释的确定性结果，不保存 AI 结论。
+5. **面板快照层**：`dashboard_day_snapshots` 和 `dashboard_global_snapshots`。面板按日访问只读取快照；输入变化通过去重任务队列刷新目标日及受其基线影响的后续日期。快照可从规范层重建，不是唯一数据源。
 
 当前把路线点保存在 JSON blob 的方式需要改为 `route_points` 表，至少包含时间、经纬度、海拔、速度、精度和顺序索引。
 

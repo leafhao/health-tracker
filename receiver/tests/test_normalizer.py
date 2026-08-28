@@ -11,8 +11,14 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from receiver.app import create_app
+from receiver.dashboard_materializer import DashboardMaterializer
 from receiver.exporter import export_day
 from receiver.normalizer import normalize_day, normalized_sleep_segments
+from receiver.worker import (
+    CLOUD_RELAY_WORKER,
+    NORMALIZATION_WORKER,
+    update_worker_heartbeat,
+)
 
 
 TOKEN = "normalizer-test-token"
@@ -444,6 +450,80 @@ class NormalizerTests(unittest.TestCase):
         self.assertTrue(after.json()["projection"]["available"])
         self.assertIn("recovery", after.json()["insights"])
         self.assertEqual(after.json()["availability"]["heart_rate"]["records"], 0)
+
+    def test_dashboard_day_is_served_from_a_rebuildable_snapshot(self) -> None:
+        self.ingest_quantities(
+            [
+                {
+                    "uuid": "snapshot-steps",
+                    "type": "HKQuantityTypeIdentifierStepCount",
+                    "value": 321,
+                    "unit": "count",
+                    "start_date": "2026-08-27T00:00:00Z",
+                    "end_date": "2026-08-27T00:01:00Z",
+                    "source_name": "My Apple Watch",
+                }
+            ]
+        )
+        normalize_day(self.database, date(2026, 8, 27))
+        result = DashboardMaterializer(self.database).run_once()
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(
+            self.database.fetch_all(
+                "SELECT COUNT(*) AS count FROM dashboard_day_snapshots"
+            )[0]["count"],
+            1,
+        )
+        with self.database.connection() as connection:
+            connection.execute(
+                "DELETE FROM normalized_daily_summaries WHERE timezone=? AND date=?",
+                ("Asia/Shanghai", "2026-08-27"),
+            )
+        response = self.client.get("/api/v1/dashboard/day/2026-08-27")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["daily"]["steps"], 321)
+
+    def test_external_worker_readiness_uses_persisted_heartbeats(self) -> None:
+        previous = os.environ.get("HEALTH_RECEIVER_WORKERS_EXTERNAL")
+        os.environ["HEALTH_RECEIVER_WORKERS_EXTERNAL"] = "1"
+        try:
+            app = create_app(Path(self.tempdir.name) / "external.sqlite3")
+            client = TestClient(
+                app,
+                base_url="http://127.0.0.1",
+                client=("127.0.0.1", 50009),
+            )
+            self.assertEqual(client.get("/api/v1/healthbeat/ready").status_code, 503)
+            update_worker_heartbeat(
+                app.state.database,
+                NORMALIZATION_WORKER,
+                "idle",
+                success=True,
+            )
+            update_worker_heartbeat(
+                app.state.database,
+                CLOUD_RELAY_WORKER,
+                "idle",
+                success=True,
+            )
+            payload = client.get("/api/v1/healthbeat/ready")
+            self.assertEqual(payload.status_code, 200)
+            self.assertEqual(payload.json()["normalization_worker_status"], "idle")
+            self.assertEqual(payload.json()["cloud_relay_worker_status"], "idle")
+            update_worker_heartbeat(
+                app.state.database,
+                NORMALIZATION_WORKER,
+                "error",
+                error="snapshot rebuild failed",
+            )
+            failed = client.get("/api/v1/healthbeat/ready")
+            self.assertEqual(failed.status_code, 503)
+            self.assertIn("snapshot rebuild failed", " ".join(failed.json()["failures"]))
+        finally:
+            if previous is None:
+                os.environ.pop("HEALTH_RECEIVER_WORKERS_EXTERNAL", None)
+            else:
+                os.environ["HEALTH_RECEIVER_WORKERS_EXTERNAL"] = previous
 
     def test_agent_api_is_local_tokenless_and_returns_documented_context(self) -> None:
         self.ingest_quantities(

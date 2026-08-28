@@ -47,7 +47,7 @@ sudo dnf install python3 curl sqlite avahi avahi-tools
 └── backups/automatic/
 ```
 
-systemd 会管理 Receiver 自动重启、每小时导出、每 5 分钟深度就绪检查，以及每天 03:15 的 SQLite 检查和 AES-256-GCM 加密备份。日志直接进入 journald，不另行维护易失控的文本日志。
+systemd 会分别管理 `health-tracker-receiver` Web API、`health-tracker-normalizer` 规整/面板物化 Worker 和 `health-tracker-cloud-relay` 云中继 Worker；每小时导出、每 5 分钟深度就绪检查，以及每天 03:15 的 SQLite 检查和 AES-256-GCM 加密备份由独立 timer 运行。日志直接进入 journald，不另行维护易失控的文本日志。
 
 ## 检查和维护
 
@@ -55,6 +55,8 @@ systemd 会管理 Receiver 自动重启、每小时导出、每 5 分钟深度�
 ./scripts/configure_receiver_linux.sh check
 ./scripts/configure_receiver_linux.sh backup-now
 journalctl -u health-tracker-receiver.service -f
+journalctl -u health-tracker-normalizer.service -f
+journalctl -u health-tracker-cloud-relay.service -f
 ```
 
 首次安装会输出一次备份恢复密钥。必须将其保存在密码管理器或离线介质中；仅有 `.htbk` 文件而没有该密钥无法恢复。

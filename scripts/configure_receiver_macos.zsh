@@ -48,10 +48,12 @@ user_name="$(id -un)"
 group_name="$(id -gn)"
 uid="$(id -u)"
 receiver_label="com.longfeihao.health-receiver"
+normalizer_label="com.longfeihao.health-normalizer"
+cloud_relay_label="com.longfeihao.health-cloud-relay"
 export_label="com.longfeihao.health-daily-export"
 watchdog_label="com.longfeihao.health-watchdog"
 maintenance_label="com.longfeihao.health-maintenance"
-labels=($receiver_label $export_label $watchdog_label $maintenance_label)
+labels=($receiver_label $normalizer_label $cloud_relay_label $export_label $watchdog_label $maintenance_label)
 
 usage() {
     cat <<'EOF'
@@ -115,9 +117,18 @@ check_status() {
     else
         print -- "✗ Receiver 未由 launchd 加载"
     fi
+    local worker_label
+    for worker_label in $normalizer_label $cloud_relay_label; do
+        if launchctl print "gui/$uid/$worker_label" >/dev/null 2>&1 || \
+           launchctl print "system/$worker_label" >/dev/null 2>&1; then
+            print -- "✓ Worker 已加载：$worker_label"
+        else
+            print -- "✗ Worker 未加载：$worker_label"
+        fi
+    done
     if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8787/api/v1/healthbeat/ready >/tmp/health-tracker-ready-check.json 2>/dev/null; then
         print -- "✓ 深度就绪检测通过"
-        command -v jq >/dev/null 2>&1 && jq '{status,database,pending_normalization_jobs,sequence_gaps}' /tmp/health-tracker-ready-check.json
+        command -v jq >/dev/null 2>&1 && jq '{status,database,pending_normalization_jobs,pending_dashboard_snapshots,sequence_gaps}' /tmp/health-tracker-ready-check.json
     else
         print -- "✗ 深度就绪检测失败"
     fi
@@ -168,6 +179,7 @@ common_env = {
     "HEALTH_RECEIVER_TOKEN_SHA256": os.environ["HT_TOKEN_HASH"],
     "HEALTH_RECEIVER_PUBLIC_URLS": os.environ["HT_PUBLIC_URLS"],
     "HEALTH_RECEIVER_TRUSTED_TAILSCALE_LOGIN": os.environ["HT_TRUSTED_LOGIN"],
+    "HEALTH_RECEIVER_WORKERS_EXTERNAL": "1",
 }
 service_env = {
     **common_env,
@@ -177,6 +189,8 @@ service_env = {
     "HEALTH_TRACKER_LOG_DIR": logs,
     "HEALTH_TRACKER_LAUNCH_DOMAIN": domain,
     "HEALTH_TRACKER_RECEIVER_LABEL": "com.longfeihao.health-receiver",
+    "HEALTH_TRACKER_NORMALIZER_LABEL": "com.longfeihao.health-normalizer",
+    "HEALTH_TRACKER_CLOUD_RELAY_LABEL": "com.longfeihao.health-cloud-relay",
     "HEALTH_TRACKER_OWNER": user,
     "HEALTH_TRACKER_OWNER_GROUP": group,
 }
@@ -197,6 +211,30 @@ receiver = {
     "ThrottleInterval": 10,
     "StandardOutPath": f"{logs}/receiver.log",
     "StandardErrorPath": f"{logs}/receiver-error.log",
+}
+normalizer = {
+    "Label": "com.longfeihao.health-normalizer",
+    "ProgramArguments": [f"{current}/.venv/bin/python", "-m", "receiver.worker", "normalization", "--data-root", support],
+    "WorkingDirectory": current,
+    "EnvironmentVariables": common_env,
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ProcessType": "Background",
+    "ThrottleInterval": 10,
+    "StandardOutPath": f"{logs}/normalizer.log",
+    "StandardErrorPath": f"{logs}/normalizer-error.log",
+}
+cloud_relay = {
+    "Label": "com.longfeihao.health-cloud-relay",
+    "ProgramArguments": [f"{current}/.venv/bin/python", "-m", "receiver.worker", "cloud-relay", "--data-root", support],
+    "WorkingDirectory": current,
+    "EnvironmentVariables": common_env,
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ProcessType": "Background",
+    "ThrottleInterval": 10,
+    "StandardOutPath": f"{logs}/cloud-relay.log",
+    "StandardErrorPath": f"{logs}/cloud-relay-error.log",
 }
 daily = {
     "Label": "com.longfeihao.health-daily-export",
@@ -231,12 +269,14 @@ maintenance = {
     "StandardErrorPath": f"{logs}/maintenance-error.log",
 }
 if mode == "daemon":
-    for item in (receiver, daily):
+    for item in (receiver, normalizer, cloud_relay, daily):
         item["UserName"] = user
         item["GroupName"] = group
     # Watchdog and maintenance retain root authority so they can restart the
     # system-domain service and rotate its open log files.
 write("com.longfeihao.health-receiver", receiver)
+write("com.longfeihao.health-normalizer", normalizer)
+write("com.longfeihao.health-cloud-relay", cloud_relay)
 write("com.longfeihao.health-daily-export", daily)
 write("com.longfeihao.health-watchdog", watchdog)
 write("com.longfeihao.health-maintenance", maintenance)
@@ -248,7 +288,7 @@ install_release() {
     [[ -n "$python_bin" ]] || { print -u2 -- "需要 Python 3.11 或更高版本"; exit 1; }
     if (( dry_run )); then
         print -- "[dry-run] 将把当前源码复制到版本化目录：$runtime_root/releases/<version>"
-        print -- "[dry-run] 将安装 $mode 模式的 Receiver、每小时导出、5 分钟 watchdog 和每日维护任务"
+        print -- "[dry-run] 将安装 $mode 模式的 Receiver、独立归一化/云拉取 Worker、每小时导出、5 分钟 watchdog 和每日维护任务"
         (( apply_power )) && print -- "[dry-run] 将通过 sudo 禁止接电自动睡眠并开启断电恢复"
         return
     fi
@@ -350,6 +390,8 @@ install_release() {
             }
         done
         launchctl kickstart -k "gui/$uid/$receiver_label"
+        launchctl kickstart -k "gui/$uid/$normalizer_label"
+        launchctl kickstart -k "gui/$uid/$cloud_relay_label"
     else
         destination="/Library/LaunchDaemons"
         sudo -v
@@ -363,6 +405,8 @@ install_release() {
             sudo launchctl bootstrap system "$destination/$label.plist"
         done
         sudo launchctl kickstart -k "system/$receiver_label"
+        sudo launchctl kickstart -k "system/$normalizer_label"
+        sudo launchctl kickstart -k "system/$cloud_relay_label"
     fi
 
     local ready=0
@@ -381,8 +425,12 @@ install_release() {
             mv -h "$runtime_root/.rollback-$release_id" "$runtime_root/current"
             if [[ "$mode" == "agent" ]]; then
                 launchctl kickstart -k "gui/$uid/$receiver_label" || true
+                launchctl kickstart -k "gui/$uid/$normalizer_label" || true
+                launchctl kickstart -k "gui/$uid/$cloud_relay_label" || true
             else
                 sudo launchctl kickstart -k "system/$receiver_label" || true
+                sudo launchctl kickstart -k "system/$normalizer_label" || true
+                sudo launchctl kickstart -k "system/$cloud_relay_label" || true
             fi
             print -u2 -- "已回滚运行目录到：$old_target"
         fi
@@ -395,7 +443,7 @@ install_release() {
         sudo systemsetup -setrestartpowerfailure on
     fi
 
-    print -- "✓ Receiver 已安装并通过深度就绪检测"
+    print -- "✓ Receiver 与独立 Worker 已安装并通过深度就绪检测"
     print -- "模式：$mode"
     print -- "版本目录：$release_dir"
     print -- "面板：http://127.0.0.1:8787/dashboard"

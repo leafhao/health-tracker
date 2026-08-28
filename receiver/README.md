@@ -11,7 +11,7 @@ v2 的核心状态默认集中在 `~/Library/Application Support/HealthTracker`�
 先把整个 `health_tracker` 项目复制或克隆到 Mac mini，然后在 Mac mini 的终端进入项目目录执行：
 
 ```bash
-zsh scripts/install_receiver_macos.zsh
+zsh scripts/configure_receiver_macos.zsh install --mode agent
 ```
 
 脚本会：
@@ -19,7 +19,7 @@ zsh scripts/install_receiver_macos.zsh
 - 检查 Python 3.11+ 并创建 `.venv`。
 - 安装 Receiver 依赖并初始化 SQLite。
 - 保留一枚不对外显示的随机 v1 兼容凭据；新管理和配对流程不再复用它。
-- 安装并启动 `com.longfeihao.health-receiver` 常驻服务，并通过 Bonjour 在局域网广播。
+- 安装并启动 Web API、规整/面板物化、云中继三个独立常驻进程，并通过 Bonjour 在局域网广播。
 - 安装每小时刷新昨天 JSON 的 `com.longfeihao.health-daily-export` 服务。
 - 打开无密码管理面板；手机配对由本机面板确认，不再依赖 Tailscale。
 
@@ -34,6 +34,8 @@ brew install python@3.12
 ```bash
 curl http://127.0.0.1:8787/api/v1/healthbeat/health
 launchctl print gui/$(id -u)/com.longfeihao.health-receiver
+launchctl print gui/$(id -u)/com.longfeihao.health-normalizer
+launchctl print gui/$(id -u)/com.longfeihao.health-cloud-relay
 ```
 
 重新运行安装脚本会更新依赖、备份旧 plist 并重启服务，不会改变 Receiver 加密私钥或已注册设备。
@@ -56,6 +58,17 @@ HEALTH_RECEIVER_TOKEN_SHA256='Token的SHA-256散列' \
 HEALTH_RECEIVER_DB='/绝对路径/health.sqlite3' \
 .venv/bin/uvicorn receiver.app:app --host 0.0.0.0 --port 8787
 ```
+
+上面的开发启动方式会在 Web 进程内嵌后台循环，便于单命令调试。正式安装会设置
+`HEALTH_RECEIVER_WORKERS_EXTERNAL=1`，并分别运行：
+
+```bash
+.venv/bin/python -m receiver.worker normalization --data-root '/数据目录'
+.venv/bin/python -m receiver.worker cloud-relay --data-root '/数据目录'
+```
+
+这样长耗时规整、历史面板回填或云端暂时限流不会阻塞 HTTP API，也能由 launchd/systemd
+分别重启。三个进程共用同一台机器上的 SQLite WAL 数据库；当前架构不支持多主机同时写这份数据库。
 
 浏览器访问 `http://Mac地址:8787/api/v1/healthbeat/health`，应返回 `{"status":"ok", ...}`。不要把 8787 端口映射到公网；家庭局域网与 Tailscale 地址会进入同一个服务。
 
@@ -82,7 +95,7 @@ HEALTH_RECEIVER_DB='/绝对路径/health.sqlite3' \
   --from-date 2026-08-21 --to-date 2026-08-27
 ```
 
-数据写入后由后台任务重建受影响日期的物化汇总；日文件导出和面板请求只读取已计算结果，避免切换日期时重复扫描原始样本。
+数据写入后由后台任务重建受影响日期的物化汇总和完整面板 JSON 快照。目标日变化时，依赖其 28 日基线的后续日期也会进入去重队列。全局“数据可用性”另有版本化快照；日面板请求只读取这些已计算结果和少量同步状态，避免切换日期时扫描原始样本。所有快照都能从规范化表重新生成，不是唯一数据源。
 
 ## 健康数据面板
 

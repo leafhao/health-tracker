@@ -28,7 +28,7 @@
 该模式安装到当前用户的 `~/Library/LaunchAgents`，具备：
 
 - 登录后自动启动；
-- Receiver 退出后由 launchd 自动重启；
+- Web API、规整/面板物化 Worker、云中继 Worker 分进程运行，各自退出后由 launchd 自动重启；
 - 每 5 分钟深度就绪检测，连续两次失败后重启；
 - 每小时刷新昨日 JSON；
 - 每天 03:15 执行 SQLite 检查、WAL checkpoint、加密备份、备份保留和日志轮转。
@@ -78,6 +78,7 @@ curl http://127.0.0.1:8787/api/v1/healthbeat/ready
 - 规整 worker 心跳；
 - S3 云中继 worker 心跳；
 - 待规整任务数量；
+- 待生成面板快照数量；
 - 同步序列缺口。
 
 HTTP `200` 表示 ready，`503` 表示进程仍在但内部服务不完整。

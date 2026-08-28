@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import sqlite3
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
@@ -67,9 +68,19 @@ class Database:
             connection.close()
 
     def initialize(self) -> None:
-        with self.connection() as connection:
-            connection.executescript(self.schema_path.read_text(encoding="utf-8"))
-            apply_migrations(connection)
+        # API and both workers can be started together by launchd/systemd. SQLite
+        # transactions alone do not serialize executescript(), which may commit
+        # between migration statements, so guard the complete bootstrap with a
+        # host-local advisory lock.
+        lock_path = self.path.with_name(f"{self.path.name}.initialize.lock")
+        with lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                with self.connection() as connection:
+                    connection.executescript(self.schema_path.read_text(encoding="utf-8"))
+                    apply_migrations(connection)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def upsert(self, table: str, records: Sequence[WireModel], remote_address: str | None) -> int:
         if table not in WIRE_TABLES:

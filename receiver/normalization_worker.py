@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from .dashboard_materializer import DashboardMaterializer, enqueue_snapshot_dependencies
 from .database import Database
 from .normalizer import normalize_day
 
@@ -38,13 +39,27 @@ class NormalizationWorker:
                 break
             claimed += 1
             try:
-                normalize_day(self.database, date.fromisoformat(job["date"]), job["timezone"])
+                target_date = date.fromisoformat(job["date"])
+                normalize_day(self.database, target_date, job["timezone"])
+                enqueue_snapshot_dependencies(
+                    self.database,
+                    target_date,
+                    job["timezone"],
+                    reason=f"normalization job {job['id']}",
+                )
             except Exception as exc:
                 failed += 1
                 self._finish(job, error=exc)
             else:
                 completed += 1
                 self._finish(job)
+        materialized = DashboardMaterializer(self.database).run_once(
+            limit=max(100, limit * 40)
+        )
+        if materialized.failed:
+            raise RuntimeError(
+                f"{materialized.failed} dashboard snapshot job(s) failed"
+            )
         return NormalizationResult(claimed, completed, failed)
 
     def recover_interrupted_jobs(self) -> None:

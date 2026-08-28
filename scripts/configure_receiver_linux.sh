@@ -37,6 +37,8 @@ unit_dir="/etc/systemd/system"
 receiver_unit="health-tracker-receiver.service"
 units=(
     health-tracker-receiver.service
+    health-tracker-normalizer.service
+    health-tracker-cloud-relay.service
     health-tracker-daily-export.service health-tracker-daily-export.timer
     health-tracker-watchdog.service health-tracker-watchdog.timer
     health-tracker-maintenance.service health-tracker-maintenance.timer
@@ -107,10 +109,18 @@ check_status() {
         printf '\u2717 Receiver is not active\n'
         systemctl --no-pager --full status "$receiver_unit" 2>/dev/null | tail -n 12 || true
     fi
+    local worker_unit
+    for worker_unit in health-tracker-normalizer.service health-tracker-cloud-relay.service; do
+        if systemctl is-active --quiet "$worker_unit"; then
+            printf '\u2713 Worker is active: %s\n' "$worker_unit"
+        else
+            printf '\u2717 Worker is not active: %s\n' "$worker_unit"
+        fi
+    done
     if curl --fail --silent --show-error --max-time 5 \
         http://127.0.0.1:8787/api/v1/healthbeat/ready >/tmp/health-tracker-ready-check.json 2>/dev/null; then
         printf '\u2713 Deep readiness check passed\n'
-        command -v jq >/dev/null 2>&1 && jq '{status,database,pending_normalization_jobs,sequence_gaps}' /tmp/health-tracker-ready-check.json
+        command -v jq >/dev/null 2>&1 && jq '{status,database,pending_normalization_jobs,pending_dashboard_snapshots,sequence_gaps}' /tmp/health-tracker-ready-check.json
     else
         printf '\u2717 Deep readiness check failed\n'
     fi
@@ -172,6 +182,7 @@ environment = {
     "HEALTH_RECEIVER_TOKEN_SHA256": os.environ["HT_TOKEN_HASH"],
     "HEALTH_RECEIVER_PUBLIC_URLS": os.environ["HT_PUBLIC_URLS"],
     "HEALTH_RECEIVER_TRUSTED_TAILSCALE_LOGIN": os.environ["HT_TRUSTED_LOGIN"],
+    "HEALTH_RECEIVER_WORKERS_EXTERNAL": "1",
 }
 (out / "receiver.env").write_text(
     "".join(f"{name}={quote(value)}\n" for name, value in environment.items()),
@@ -206,6 +217,47 @@ EnvironmentFile=-{env_file}
 Environment={quote('HOME=' + data)}
 WorkingDirectory={quote(runtime)}
 ExecStart={quote(runtime + '/.venv/bin/uvicorn')} receiver.app:app --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+{hardening}
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+write("health-tracker-normalizer.service", f"""
+[Unit]
+Description=HealthTracker normalization and dashboard materialization worker
+After=health-tracker-receiver.service
+
+[Service]
+Type=simple
+EnvironmentFile=-{env_file}
+Environment={quote('HOME=' + data)}
+WorkingDirectory={quote(runtime)}
+ExecStart={quote(runtime + '/.venv/bin/python')} -m receiver.worker normalization --data-root {quote(data)}
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+{hardening}
+
+[Install]
+WantedBy=multi-user.target
+""")
+
+write("health-tracker-cloud-relay.service", f"""
+[Unit]
+Description=HealthTracker encrypted cloud relay worker
+Wants=network-online.target
+After=network-online.target health-tracker-receiver.service
+
+[Service]
+Type=simple
+EnvironmentFile=-{env_file}
+Environment={quote('HOME=' + data)}
+WorkingDirectory={quote(runtime)}
+ExecStart={quote(runtime + '/.venv/bin/python')} -m receiver.worker cloud-relay --data-root {quote(data)}
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
@@ -250,6 +302,8 @@ After=health-tracker-receiver.service
 [Service]
 Type=oneshot
 Environment="HEALTH_TRACKER_RECEIVER_UNIT=health-tracker-receiver.service"
+Environment="HEALTH_TRACKER_NORMALIZER_UNIT=health-tracker-normalizer.service"
+Environment="HEALTH_TRACKER_CLOUD_RELAY_UNIT=health-tracker-cloud-relay.service"
 ExecStart=/bin/bash {quote(runtime + '/scripts/receiver_watchdog_linux.sh')}
 NoNewPrivileges=true
 PrivateTmp=true
@@ -353,8 +407,8 @@ install_release() {
         printf '[dry-run] Linux/systemd release -> %s/releases/<version>\n' "$runtime_root"
         printf '[dry-run] Persistent encrypted state -> %s\n' "$data_root"
         printf '[dry-run] Dedicated service account -> %s\n' "$service_user"
-        printf '[dry-run] Receiver + hourly export + 5-minute watchdog + daily encrypted backup\n'
-        printf '[dry-run] Generated environment and all seven systemd units validated\n'
+        printf '[dry-run] Receiver + isolated normalization/cloud workers + hourly export + 5-minute watchdog + daily encrypted backup\n'
+        printf '[dry-run] Generated environment and all nine systemd units validated\n'
         (( open_firewall )) && printf '[dry-run] Open TCP 8787 using active firewalld/UFW\n'
         rm -rf -- "$preview_dir"
         cleanup_dir=""
@@ -463,6 +517,7 @@ install_release() {
     fi
     sudo systemctl daemon-reload
     sudo systemctl enable --now "$receiver_unit" \
+        health-tracker-normalizer.service health-tracker-cloud-relay.service \
         health-tracker-daily-export.timer health-tracker-watchdog.timer health-tracker-maintenance.timer
     configure_firewall
 
@@ -480,14 +535,15 @@ install_release() {
         if [[ -n "$old_target" ]]; then
             sudo ln -s "$old_target" "$runtime_root/.rollback-$release_id"
             sudo mv -Tf "$runtime_root/.rollback-$release_id" "$runtime_root/current"
-            sudo systemctl restart "$receiver_unit"
+            sudo systemctl restart "$receiver_unit" \
+                health-tracker-normalizer.service health-tracker-cloud-relay.service
             printf 'Runtime symlink rolled back to %s\n' "$old_target" >&2
         fi
         sudo systemctl --no-pager --full status "$receiver_unit" >&2 || true
         exit 1
     fi
 
-    printf '\u2713 Receiver installed and ready\n'
+    printf '\u2713 Receiver and isolated workers installed and ready\n'
     printf 'Dashboard: http://127.0.0.1:8787/dashboard\n'
     printf 'LAN API:   http://<linux-ip>:8787\n'
     printf 'Runtime:   %s\n' "$release_dir"
