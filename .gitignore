@@ -1,0 +1,42 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime health data and secrets
+receiver/data/
+.local-health-state/
+**/keys/
+**/relay/
+**/backups/
+exports/
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.jsonl
+*.htbk
+
+# Apple/Xcode
+build/
+.build/
+.swiftpm/
+DerivedData/
+ios/HealthBeat/DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM
+*.mobileprovision
+**/xcuserdata/
+*.xcuserstate
+
+# Local tooling
+.idea/
+.vscode/

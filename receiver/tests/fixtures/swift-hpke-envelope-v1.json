@@ -1,0 +1,29 @@
+{
+  "device_signing_public_key_base64": "5/FioQvsVZr+oZXk3OhLaVaNXSywlj60RsBoXisX8vA=",
+  "envelope": {
+    "format": "health-envelope/1",
+    "header_base64": "eyJiYXRjaF9pZCI6IjAxOThkOGUwLXN3aWZ0LWZpeHR1cmUiLCJjb250ZW50X2VuY29kaW5nIjoiaWRlbnRpdHkiLCJjb250ZW50X3R5cGUiOiJhcHBsaWNhdGlvbi92bmQuaGVhbHRoLWV2ZW50LWJhdGNoK2pzb247dj0xIiwiY3JlYXRlZF9hdCI6IjIwMjYtMDgtMjhUMTQ6MDA6MDAuMDAwWiIsImRldmljZV9pZCI6ImRldmljZS1maXh0dXJlIiwicGFkZGluZ19zaXplIjoxNiwicGxhaW50ZXh0X3NpemUiOjQyNCwicHJvdG9jb2wiOiJoZWFsdGgtZW52ZWxvcGUvMSIsInJlY2VpdmVyX2tleV9pZCI6InJlY2VpdmVyLWZpeHR1cmUiLCJzZXF1ZW5jZSI6NDIsInNpZ25pbmdfa2V5X2lkIjoiaXBob25lLWZpeHR1cmUifQ==",
+    "hpke_ciphertext_base64": "GyYou+/AxcHMGNW+cJnNPlETQsMc1zLukSUxJRyxp1Ju97vg4c5dLMOfKyYvKYyLxd4SQ2eIxk+d83oWHPujAmsQvL4WZOQr58NlvkU7WxmjqEQHYtCMvak30jLMzONm02lNUQmwbMRFiDIzXRRwNEtmhwXrZM9Ps3U/lYK/sR5hlbk1pF4903dDk9cvAW38CAx6IDjkuJFIFEJIag/SGFi1P9o7kU9Un4kJe1FFAhejA20ZEQ8glrQ/4h1b/gbbgNQbgic1asZeZ0FYkLD4u++uJe6hy2s0QHlIaPlgYsY7MNLlyzV2n0FnBosEGi4Fwd+x/3ArtZRPzgXRNC8RS9ZwuEsPBUmerddk2irmNwIWVyYschxccNh2i8JH/irLIUB0nDY7m0vGifj7wLzhs3eaNLSPUzPTmIk33SdFsKeqCPcn7t7Y1E/i+xHHHA37SENAXyl/jxojVhZ/X+0tQvFfqa+x9O95b6OC768qi1lhYoNalSG3lzHN7kt/KPup2SsmTEHPt2vUNF50/gzdTDB/iKckPzgwZOm+4WB/fpxq2PDhQiTdeuijiLHHRNarB2w1939S46RR5zMPOk57hsngXGyyaXYFq3VRniHe3/0DNyjSQyLGEnOnQDo1hsfBBYOzy8jBGf8=",
+    "signature_base64": "E+5hwQEQek2WpxqEicUn5Fzi7dEoEuvtBRD2g10FNbkQWRPBcDyGjg09UK0O9prTPHu/OrRLO/2MsvjLIK1tDg=="
+  },
+  "expected_payload": {
+    "batch_id": "0198d8e0-swift-fixture",
+    "created_at": "2026-08-28T14:00:00.000Z",
+    "device_id": "device-fixture",
+    "events": [
+      {
+        "entity_type": "quantity",
+        "event_id": "event-fixture-0001",
+        "observed_at": "2026-08-28T13:59:00.000Z",
+        "operation": "upsert",
+        "payload": {"unit": "count/min", "value": 72},
+        "source_uuid": "sample-fixture-uuid"
+      }
+    ],
+    "owner_id": "owner-fixture",
+    "schema_version": 1,
+    "sequence": 42,
+    "stream_id": "HKQuantityTypeIdentifierHeartRate"
+  },
+  "receiver_private_key_base64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+}

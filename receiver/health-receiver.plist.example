@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.longfeihao.health-receiver</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_DIR__/.venv/bin/uvicorn</string>
+        <string>receiver.app:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8787</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HEALTH_RECEIVER_DB</key>
+        <string>__DATABASE_PATH__</string>
+        <key>HEALTH_RECEIVER_TOKEN_SHA256</key>
+        <string>__TOKEN_SHA256__</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/health-receiver.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/health-receiver-error.log</string>
+</dict>
+</plist>

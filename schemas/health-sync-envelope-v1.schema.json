@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://health-tracker.local/schemas/health-sync-envelope-v1.schema.json",
+  "title": "Health Sync Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "header_base64",
+    "hpke_ciphertext_base64",
+    "signature_base64"
+  ],
+  "properties": {
+    "format": {"const": "health-envelope/1"},
+    "header_base64": {"type": "string", "minLength": 4},
+    "hpke_ciphertext_base64": {"type": "string", "minLength": 64},
+    "signature_base64": {"type": "string", "minLength": 80}
+  }
+}

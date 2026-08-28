@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.longfeihao.health-daily-export</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_DIR__/.venv/bin/python</string>
+        <string>-m</string>
+        <string>receiver.cli</string>
+        <string>export</string>
+        <string>--database</string>
+        <string>__DATABASE_PATH__</string>
+        <string>--timezone</string>
+        <string>Asia/Shanghai</string>
+        <string>--output-dir</string>
+        <string>__EXPORT_DIR__</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/health-daily-export.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/health-daily-export-error.log</string>
+</dict>
+</plist>

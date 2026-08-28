@@ -1,0 +1,261 @@
+openapi: 3.1.0
+info:
+  title: Personal Health Receiver
+  version: 0.1.0
+  description: HealthBeat-compatible, idempotent Apple Health ingest API.
+servers:
+  - url: http://192.168.1.50:8787
+    description: Home LAN
+  - url: http://100.64.0.1:8787
+    description: Tailscale placeholder
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/healthbeat/health:
+    get:
+      security: []
+      operationId: health
+      responses:
+        '200':
+          description: Receiver status and protocol capabilities.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, server_time, schema_version, max_batch]
+                properties:
+                  status: {type: string, const: ok}
+                  server_time: {type: string, format: date-time}
+                  schema_version: {type: integer}
+                  max_batch: {type: integer, maximum: 500}
+  /api/v1/healthbeat/quantity-samples:
+    post:
+      operationId: ingestQuantitySamples
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuantityEnvelope'
+      responses:
+        '200': {$ref: '#/components/responses/Ingested'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/healthbeat/category-samples:
+    post:
+      operationId: ingestCategorySamples
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CategoryEnvelope'
+      responses:
+        '200': {$ref: '#/components/responses/Ingested'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/healthbeat/workouts:
+    post:
+      operationId: ingestWorkouts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkoutEnvelope'
+      responses:
+        '200': {$ref: '#/components/responses/Ingested'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/healthbeat/workout-routes:
+    post:
+      operationId: ingestWorkoutRoutes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteEnvelope'
+      responses:
+        '200': {$ref: '#/components/responses/Ingested'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/healthbeat/activity-summaries:
+    post:
+      operationId: ingestActivitySummaries
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityEnvelope'
+      responses:
+        '200': {$ref: '#/components/responses/Ingested'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/healthbeat/reconcile:
+    post:
+      operationId: reconcileSlice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReconcileRequest'
+      responses:
+        '200':
+          description: Number of stale records deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted: {type: integer, minimum: 0}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/days/{target_date}:
+    get:
+      operationId: exportAnalysisDay
+      parameters:
+        - name: target_date
+          in: path
+          required: true
+          schema: {type: string, format: date}
+        - name: timezone_name
+          in: query
+          required: false
+          schema: {type: string, default: Asia/Shanghai}
+      responses:
+        '200':
+          description: Minute-grouped quantities, previous-night sleep, target-day workouts, routes, activity summary and freshness.
+          content:
+            application/json:
+              schema: {type: object}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  responses:
+    Ingested:
+      description: Idempotent batch result.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/IngestResponse'
+    Unauthorized:
+      description: Missing or invalid token.
+  schemas:
+    IngestResponse:
+      type: object
+      required: [accepted, rejected]
+      properties:
+        accepted: {type: integer, minimum: 0}
+        rejected: {type: integer, minimum: 0}
+    QuantityEnvelope:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/QuantitySample'}
+    QuantitySample:
+      type: object
+      required: [uuid, type, value, start_date, end_date]
+      properties:
+        uuid: {type: string}
+        type: {type: string}
+        value: {type: number}
+        unit: {type: [string, 'null']}
+        start_date: {type: string}
+        end_date: {type: string}
+        source_name: {type: [string, 'null']}
+        source_bundle_id: {type: [string, 'null']}
+        device_name: {type: [string, 'null']}
+        metadata: {type: [string, 'null']}
+    CategoryEnvelope:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/CategorySample'}
+    CategorySample:
+      allOf:
+        - $ref: '#/components/schemas/QuantitySample'
+        - type: object
+          properties:
+            value: {type: integer}
+            value_label: {type: [string, 'null']}
+    WorkoutEnvelope:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/Workout'}
+    Workout:
+      type: object
+      required: [uuid, activity_type, duration_seconds, start_date, end_date]
+      properties:
+        uuid: {type: string}
+        activity_type: {type: string}
+        duration_seconds: {type: number}
+        total_energy_burned_kcal: {type: [number, 'null']}
+        total_distance_meters: {type: [number, 'null']}
+        total_swimming_strokes: {type: [number, 'null']}
+        total_flights_climbed: {type: [number, 'null']}
+        start_date: {type: string}
+        end_date: {type: string}
+        source_name: {type: [string, 'null']}
+        source_bundle_id: {type: [string, 'null']}
+        device_name: {type: [string, 'null']}
+        metadata: {type: [string, 'null']}
+    RouteEnvelope:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/WorkoutRoute'}
+    WorkoutRoute:
+      type: object
+      required: [uuid, workout_uuid, start_date, location_count]
+      properties:
+        uuid: {type: string}
+        workout_uuid: {type: string}
+        start_date: {type: string}
+        location_count: {type: integer, minimum: 0}
+        locations_json: {type: [string, 'null']}
+    ActivityEnvelope:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/ActivitySummary'}
+    ActivitySummary:
+      type: object
+      required: [date]
+      properties:
+        date: {type: string}
+        active_energy_burned: {type: [number, 'null']}
+        active_energy_burned_goal: {type: [number, 'null']}
+        exercise_time_minutes: {type: [number, 'null']}
+        exercise_time_goal_minutes: {type: [number, 'null']}
+        stand_hours: {type: [integer, 'null']}
+        stand_hours_goal: {type: [integer, 'null']}
+    ReconcileRequest:
+      type: object
+      required: [table, since, until, valid_uuids]
+      properties:
+        table: {type: string}
+        type_column: {type: [string, 'null']}
+        type_value: {type: [string, 'null']}
+        since: {type: string}
+        until: {type: string}
+        valid_uuids:
+          type: array
+          maxItems: 5000
+          items: {type: string}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://health-tracker.local/schemas/health-event-batch-v1.schema.json",
+  "title": "Health Event Batch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "batch_id", "owner_id", "device_id", "stream_id", "sequence", "created_at", "events"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "batch_id": {"type": "string", "minLength": 16, "maxLength": 128},
+    "previous_batch_id": {"type": ["string", "null"], "maxLength": 128},
+    "owner_id": {"type": "string", "minLength": 8, "maxLength": 128},
+    "device_id": {"type": "string", "minLength": 8, "maxLength": 128},
+    "stream_id": {"type": "string", "minLength": 1, "maxLength": 255},
+    "sequence": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "anchor_digest": {"type": ["string", "null"], "maxLength": 128},
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": {"$ref": "#/$defs/event"}
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "operation", "entity_type", "source_uuid", "observed_at"],
+      "properties": {
+        "event_id": {"type": "string", "minLength": 16, "maxLength": 160},
+        "operation": {"enum": ["upsert", "delete"]},
+        "entity_type": {
+          "enum": ["quantity", "category", "workout", "workout_route", "activity_summary", "device_capabilities"]
+        },
+        "source_uuid": {"type": "string", "minLength": 1, "maxLength": 160},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "payload": {"type": ["object", "null"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"operation": {"const": "upsert"}}},
+          "then": {"required": ["payload"], "properties": {"payload": {"type": "object"}}}
+        }
+      ]
+    }
+  }
+}
