@@ -732,6 +732,25 @@ final class PersonalHealthSyncService: ObservableObject {
                 )
                 return
             }
+            if allowHistoricalBackfill,
+               changedTypeIdentifiers == nil,
+               needsHistoricalBackfill {
+                let directURLs = await HealthV2PairingService.shared.directReceiverBaseURLs(
+                    fallback: currentConfig
+                )
+                guard !directURLs.isEmpty else {
+                    throw HealthV2PairingError.noEndpoint
+                }
+                statusMessage = "正在通过局域网扩展历史范围…"
+                uploadedRecords += try await runHistoricalMonthBackfill(
+                    referenceDate: Date(),
+                    directBaseURLs: directURLs,
+                    pairing: credentials.material,
+                    signingPrivateKey: credentials.signingPrivateKey
+                )
+                pendingBatches = try await v2Collector.pendingBatchCount()
+                await refreshInitialDirectProgress()
+            }
             let cloudConfig = CloudStorageConfig.load()
             var cloudDeferredUntil: Date?
             statusMessage = "正在发送本地待上传密文…"

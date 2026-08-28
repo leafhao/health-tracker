@@ -347,14 +347,19 @@ private struct HealthSyncSettingsView: View {
                             Text(range.displayName).tag(range)
                         }
                     }
-                    .disabled(sync.initialDirectTotalBatches > 0)
+                    .disabled(
+                        sync.isSyncing
+                            || (!sync.isInitialDirectBootstrapComplete
+                                && sync.initialDirectTotalBatches > 0)
+                    )
                     Text(sync.initialHistoryRange.workloadDescription)
                         .font(.footnote)
                         .foregroundStyle(sync.initialHistoryRange == .all ? .orange : .secondary)
                     LabeledContent("历史回溯", value: sync.historicalSyncMessage)
                     LabeledContent("后续同步", value: "仅传增量变更")
                     Button(needsInitialSync ? "开始或继续首次同步" : "所选历史范围已覆盖") {
-                        if sync.initialDirectTotalBatches == 0 {
+                        if sync.initialDirectTotalBatches == 0
+                            || sync.isInitialDirectBootstrapComplete {
                             showInitialSyncSetup = true
                         } else {
                             Task { await sync.syncIncrementalEncrypted(allowHistoricalBackfill: true) }
@@ -372,7 +377,7 @@ private struct HealthSyncSettingsView: View {
                             value: "\(sync.initialDirectCompletedBatches) / \(sync.initialDirectTotalBatches) 批次"
                         )
                     }
-                    Text("首次开始生成批次后，历史范围会锁定，避免中途修改导致数据重复或缺失。完成后建立 HealthKit 增量游标，不会每天重复扫描所选天数。")
+                    Text("历史批次生成期间会锁定范围，避免中途修改。完成后可以继续扩展到更早范围；已覆盖月份不会重复入库。")
                         .font(.footnote).foregroundStyle(.secondary)
                     Text("后台增量同步由 HealthKit 变化唤醒、系统后台刷新和进入前台补漏共同完成。iOS 决定实际运行时机，因此这些机制不是可精确调整的定时配置。")
                         .font(.footnote).foregroundStyle(.secondary)
