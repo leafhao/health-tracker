@@ -23,10 +23,15 @@ jobs:
       - run: python -m unittest discover -s receiver/tests -v
 
   ios:
-    runs-on: macos-15
+    # Medication HealthKit APIs used by the app require the iOS 26 SDK.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+      - name: Record Apple toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-version
       - name: Build iOS app without signing
         run: >-
           xcodebuild
