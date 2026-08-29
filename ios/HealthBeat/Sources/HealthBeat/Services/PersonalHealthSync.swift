@@ -410,6 +410,8 @@ final class PersonalHealthSyncService: ObservableObject {
     private static let recentDomainRepairVersionKey =
         "personalReceiver.v2.recentDomainRepairVersion"
     private static let recentDomainRepairVersion = "30-days-semantic-sleep-workout-activity-v2"
+    private static let deferredShortcutSyncKey =
+        "personalReceiver.v2.deferredShortcutSync"
 
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -754,6 +756,7 @@ final class PersonalHealthSyncService: ObservableObject {
             throw ShortcutIncrementalSyncError.cloudNotConfigured
         }
         if isSyncing {
+            requestDeferredShortcutSync()
             return ShortcutIncrementalSyncResult(
                 records: 0,
                 pendingBatches: (try? await v2Collector.pendingBatchCount()) ?? pendingBatches,
@@ -765,7 +768,7 @@ final class PersonalHealthSyncService: ObservableObject {
         isSyncing = true
         uploadedRecords = 0
         errorMessage = nil
-        defer { isSyncing = false }
+        defer { finishSyncAndScheduleDeferredShortcut() }
         do {
             isV2Paired = await HealthV2PairingService.shared.isPaired
             guard isV2Paired else { throw ShortcutIncrementalSyncError.pairingRequired }
@@ -832,7 +835,7 @@ final class PersonalHealthSyncService: ObservableObject {
         isSyncing = true
         uploadedRecords = 0
         errorMessage = nil
-        defer { isSyncing = false }
+        defer { finishSyncAndScheduleDeferredShortcut() }
         do {
             isV2Paired = await HealthV2PairingService.shared.isPaired
             guard isV2Paired else { throw HealthV2PairingError.unavailable }
@@ -880,7 +883,7 @@ final class PersonalHealthSyncService: ObservableObject {
         isSyncing = true
         uploadedRecords = 0
         errorMessage = nil
-        defer { isSyncing = false }
+        defer { finishSyncAndScheduleDeferredShortcut() }
         do {
             let credentials = try await HealthV2PairingService.shared.load()
             if allowHistoricalBackfill, changedTypeIdentifiers == nil {
@@ -981,6 +984,34 @@ final class PersonalHealthSyncService: ObservableObject {
         }
         if !pendingObserverTypes.isEmpty {
             scheduleObserverDrain(after: 1)
+        }
+    }
+
+    /// Coalesce a Shortcuts trigger that arrives while another HealthKit pass
+    /// owns the anchored-query lock. Persisting the flag avoids losing the
+    /// user's charger/location trigger if iOS suspends the process meanwhile.
+    private func requestDeferredShortcutSync() {
+        UserDefaults.standard.set(true, forKey: Self.deferredShortcutSyncKey)
+        statusMessage = "已有同步任务运行；结束后将再次检查增量"
+        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
+    }
+
+    private func finishSyncAndScheduleDeferredShortcut() {
+        isSyncing = false
+        guard UserDefaults.standard.bool(forKey: Self.deferredShortcutSyncKey) else {
+            return
+        }
+        UserDefaults.standard.removeObject(forKey: Self.deferredShortcutSyncKey)
+        Task { @MainActor [weak self] in
+            // Let the just-finished task release its actor turn before the
+            // coalesced pass takes the synchronization lock again.
+            await Task.yield()
+            guard let self else { return }
+            if self.isSyncing {
+                self.requestDeferredShortcutSync()
+                return
+            }
+            _ = try? await self.performShortcutIncrementalSync()
         }
     }
 

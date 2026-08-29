@@ -12,23 +12,19 @@ struct IncrementalHealthSyncIntent: AppIntent {
     static var openAppWhenRun: Bool = false
 
     @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
+    func perform() async throws -> some IntentResult & ReturnsValue<String> {
         let result = try await PersonalHealthSyncService.shared
             .performShortcutIncrementalSync()
         if result.wasAlreadyRunning {
-            return .result(dialog: "已有同步任务正在运行，本次触发无需重复执行。")
+            return .result(value: "已有同步任务正在运行；已安排任务结束后再检查一次增量。")
         }
         if result.records == 0 {
-            return .result(dialog: "增量检查完成，没有发现新的健康记录。")
+            return .result(value: "增量检查完成，没有发现新的健康记录。")
         }
         if result.uploadScheduled {
-            return .result(
-                dialog: "已加密处理 \(result.records) 条新记录，并交给 iOS 后台上传。"
-            )
+            return .result(value: "已加密处理 \(result.records) 条新记录，并交给 iOS 后台上传。")
         }
-        return .result(
-            dialog: "已加密处理 \(result.records) 条新记录，当前有 \(result.pendingBatches) 个批次等待续传。"
-        )
+        return .result(value: "已加密处理 \(result.records) 条新记录，当前有 \(result.pendingBatches) 个批次等待续传。")
     }
 }
 
