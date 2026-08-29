@@ -82,13 +82,14 @@ private struct PersistedBackgroundUploadResult: Codable {
     let completedAt: Date
 }
 
-/// Owns the system-managed URLSession used by the long first LAN transfer.
+/// Owns the system-managed URLSession used by LAN and encrypted cloud uploads.
 ///
 /// The upload body and completion result are files, not process memory. iOS can
 /// therefore suspend or relaunch the app while the transfer continues. The
 /// caller validates the Receiver receipt before removing anything from outbox.
-final class BackgroundDirectTransferCenter: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
-    static let shared = BackgroundDirectTransferCenter()
+final class BackgroundHTTPTransferCenter: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate,
+    @unchecked Sendable {
+    static let shared = BackgroundHTTPTransferCenter()
     static var sessionIdentifier: String {
         "\(Bundle.main.bundleIdentifier ?? "org.healthtracker.collector").direct-upload"
     }
@@ -110,7 +111,7 @@ final class BackgroundDirectTransferCenter: NSObject, URLSessionDataDelegate, UR
         configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
         configuration.httpMaximumConnectionsPerHost = 1
         let queue = OperationQueue()
-        queue.name = "HealthBeat.BackgroundDirectTransfer"
+        queue.name = "HealthBeat.BackgroundHTTPTransfer"
         queue.maxConcurrentOperationCount = 1
         return URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
     }()
@@ -149,33 +150,44 @@ final class BackgroundDirectTransferCenter: NSObject, URLSessionDataDelegate, UR
     func upload(
         request: URLRequest,
         body: Data,
-        packID: String
+        transferID: String
     ) async throws -> (Data, HTTPURLResponse) {
-        if let completed = try consumeResult(packID: packID) {
+        if let completed = try consumeResult(transferID: transferID) {
             return completed
         }
-
-        let tasks = await allTasks()
-        if !tasks.contains(where: { $0.taskDescription == packID }) {
-            let bodyURL = bodyURL(packID: packID)
-            try body.write(
-                to: bodyURL,
-                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
-            )
-            var backgroundRequest = request
-            backgroundRequest.httpBody = nil
-            let task = session.uploadTask(with: backgroundRequest, fromFile: bodyURL)
-            task.taskDescription = packID
-            task.resume()
-        }
+        try await schedule(request: request, body: body, transferID: transferID)
 
         while true {
             try Task.checkCancellation()
-            if let completed = try consumeResult(packID: packID) {
+            if let completed = try consumeResult(transferID: transferID) {
                 return completed
             }
             try await Task.sleep(for: .milliseconds(300))
         }
+    }
+
+    /// Hand a file-backed upload to iOS without waiting for the response. This
+    /// keeps HealthKit observer completion independent of network latency.
+    func schedule(
+        request: URLRequest,
+        body: Data,
+        transferID: String
+    ) async throws {
+        if FileManager.default.fileExists(atPath: resultURL(transferID: transferID).path) {
+            return
+        }
+        let tasks = await allTasks()
+        guard !tasks.contains(where: { $0.taskDescription == transferID }) else { return }
+        let bodyURL = bodyURL(transferID: transferID)
+        try body.write(
+            to: bodyURL,
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+        )
+        var backgroundRequest = request
+        backgroundRequest.httpBody = nil
+        let task = session.uploadTask(with: backgroundRequest, fromFile: bodyURL)
+        task.taskDescription = transferID
+        task.resume()
     }
 
     private func allTasks() async -> [URLSessionTask] {
@@ -184,8 +196,8 @@ final class BackgroundDirectTransferCenter: NSObject, URLSessionDataDelegate, UR
         }
     }
 
-    private func consumeResult(packID: String) throws -> (Data, HTTPURLResponse)? {
-        let target = resultURL(packID: packID)
+    private func consumeResult(transferID: String) throws -> (Data, HTTPURLResponse)? {
+        let target = resultURL(transferID: transferID)
         guard FileManager.default.fileExists(atPath: target.path) else { return nil }
         let result = try JSONDecoder().decode(
             PersistedBackgroundUploadResult.self,
@@ -212,12 +224,12 @@ final class BackgroundDirectTransferCenter: NSObject, URLSessionDataDelegate, UR
         task: URLSessionTask,
         error: Error?
     ) {
-        guard let packID = task.taskDescription else { return }
+        guard let transferID = task.taskDescription else { return }
         lock.lock()
         let body = responseBodies.removeValue(forKey: task.taskIdentifier) ?? Data()
         lock.unlock()
         let result = PersistedBackgroundUploadResult(
-            packID: packID,
+            packID: transferID,
             statusCode: (task.response as? HTTPURLResponse)?.statusCode,
             responseBodyBase64: body.base64EncodedString(),
             errorDescription: error?.localizedDescription,
@@ -227,27 +239,27 @@ final class BackgroundDirectTransferCenter: NSObject, URLSessionDataDelegate, UR
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             try encoder.encode(result).write(
-                to: resultURL(packID: packID),
+                to: resultURL(transferID: transferID),
                 options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
             )
         } catch {
             // Keep the outbox untouched. A foreground retry remains safe because
             // Receiver pack ingestion is idempotent.
-            print("[BackgroundDirectTransfer] unable to persist result: \(error)")
+            print("[BackgroundHTTPTransfer] unable to persist result: \(error)")
         }
-        try? FileManager.default.removeItem(at: bodyURL(packID: packID))
+        try? FileManager.default.removeItem(at: bodyURL(transferID: transferID))
     }
 
-    private func safeName(_ packID: String) -> String {
-        packID.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+    private func safeName(_ transferID: String) -> String {
+        transferID.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
     }
 
-    private func bodyURL(packID: String) -> URL {
-        directory.appending(path: "\(safeName(packID)).upload")
+    private func bodyURL(transferID: String) -> URL {
+        directory.appending(path: "\(safeName(transferID)).upload")
     }
 
-    private func resultURL(packID: String) -> URL {
-        directory.appending(path: "\(safeName(packID)).result.json")
+    private func resultURL(transferID: String) -> URL {
+        directory.appending(path: "\(safeName(transferID)).result.json")
     }
 
     func urlSession(
@@ -273,13 +285,16 @@ final class BackgroundDirectTransferCenter: NSObject, URLSessionDataDelegate, UR
         let completion = backgroundEventsCompletion
         backgroundEventsCompletion = nil
         lock.unlock()
-        DispatchQueue.main.async { completion?() }
+        DispatchQueue.main.async {
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
+            completion?()
+        }
     }
 }
 
 @available(iOS 17.0, *)
 actor DirectEncryptedBatchUploader {
-    private let transfers = BackgroundDirectTransferCenter.shared
+    private let transfers = BackgroundHTTPTransferCenter.shared
 
     func flush(
         outbox: EncryptedHealthOutbox,
@@ -311,7 +326,7 @@ actor DirectEncryptedBatchUploader {
                     let (responseData, http) = try await transfers.upload(
                         request: request,
                         body: body,
-                        packID: pack.id
+                        transferID: "direct-\(pack.id)"
                     )
                     guard (200..<300).contains(http.statusCode) else {
                         throw SyncError.http(
@@ -714,6 +729,19 @@ final class V2HealthCollector: @unchecked Sendable {
         pairing: HealthPairingMaterial
     ) async throws -> CloudRelayUploadResult {
         try await cloudTransport.uploadPending(
+            outbox: outbox,
+            pairing: pairing,
+            config: config,
+            credentials: credentials
+        )
+    }
+
+    func scheduleCloudUpload(
+        config: CloudStorageConfig,
+        credentials: CloudStorageCredentials,
+        pairing: HealthPairingMaterial
+    ) async throws -> Int {
+        try await cloudTransport.schedulePending(
             outbox: outbox,
             pairing: pairing,
             config: config,

@@ -503,9 +503,7 @@ final class PersonalHealthSyncService: ObservableObject {
         pendingBatches = await queue.count() + ((try? await v2Collector.pendingBatchCount()) ?? 0)
         await refreshInitialDirectProgress()
         await refreshCloudStatus()
-        if UserDefaults.standard.bool(forKey: "personalReceiver.healthPermissionRequested") {
-            startObservers()
-        }
+        registerBackgroundObserversAtLaunch()
         if CloudStorageConfig.load().isConfigured {
             statusMessage = pendingBatches > 0 ? "有 \(pendingBatches) 个批次等待上传" : "已就绪"
         }
@@ -677,7 +675,7 @@ final class PersonalHealthSyncService: ObservableObject {
             guard healthKit.isAvailable else { throw HKError(.errorHealthDataUnavailable) }
             try await healthKit.requestPermissions(for: readTypes)
             UserDefaults.standard.set(true, forKey: "personalReceiver.healthPermissionRequested")
-            startObservers()
+            registerBackgroundObserversAtLaunch()
             statusMessage = "健康权限已请求"
         } catch {
             errorMessage = error.localizedDescription
@@ -690,6 +688,9 @@ final class PersonalHealthSyncService: ObservableObject {
               UserDefaults.standard.bool(forKey: "personalReceiver.healthPermissionRequested"),
               Date().timeIntervalSince(lastForegroundSync) > 15 * 60 else { return }
         lastForegroundSync = Date()
+        if !isV2Paired {
+            isV2Paired = await HealthV2PairingService.shared.isPaired
+        }
         if isV2Paired {
             await syncIncrementalEncrypted(allowHistoricalBackfill: false)
         } else {
@@ -698,12 +699,70 @@ final class PersonalHealthSyncService: ObservableObject {
     }
 
     func performBackgroundRefresh() async -> Bool {
+        registerBackgroundObserversAtLaunch()
+        isV2Paired = await HealthV2PairingService.shared.isPaired
         guard CloudStorageConfig.load().isConfigured,
               isV2Paired,
               UserDefaults.standard.bool(forKey: "personalReceiver.healthPermissionRequested")
         else { return false }
         await syncIncrementalEncrypted(allowHistoricalBackfill: false)
         return errorMessage == nil
+    }
+
+    /// HealthKit background delivery has a short execution budget. Read only
+    /// the changed anchored streams, persist encrypted batches, and hand one
+    /// stable S3 pack to the system URLSession. Receipt reconciliation and the
+    /// remaining queue are handled by BGAppRefresh or the next foreground run.
+    private func syncFromHealthObserver(
+        changedTypeIdentifiers: Set<String>
+    ) async {
+        guard !changedTypeIdentifiers.isEmpty,
+              isInitialDirectBootstrapComplete,
+              CloudStorageConfig.load().isConfigured,
+              UserDefaults.standard.bool(
+                  forKey: "personalReceiver.healthPermissionRequested"
+              ),
+              !isSyncing else {
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
+            return
+        }
+        isSyncing = true
+        uploadedRecords = 0
+        errorMessage = nil
+        defer { isSyncing = false }
+        do {
+            isV2Paired = await HealthV2PairingService.shared.isPaired
+            guard isV2Paired else { throw HealthV2PairingError.unavailable }
+            let pairing = try await HealthV2PairingService.shared.load()
+            let cutoff = Date()
+            uploadedRecords = try await v2Collector.collect(
+                quantityDescriptors: quantityDescriptors,
+                changedTypeIdentifiers: changedTypeIdentifiers,
+                bootstrapCutoff: cutoff,
+                pairing: pairing.material,
+                signingPrivateKey: pairing.signingPrivateKey
+            )
+            let cloud = CloudStorageConfig.load()
+            if cloud.provider == .s3 {
+                _ = try await v2Collector.scheduleCloudUpload(
+                    config: cloud,
+                    credentials: CloudStorageCredentials.load(for: .s3),
+                    pairing: pairing.material
+                )
+                lastEndpoint = cloud.provider.displayName
+                statusMessage = "健康变化已加密并交给 iOS 后台上传"
+            } else {
+                statusMessage = "健康变化已加密保存，等待后台刷新上传"
+            }
+            pendingBatches = try await v2Collector.pendingBatchCount()
+            await refreshCloudStatus()
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
+        } catch {
+            pendingBatches = (try? await v2Collector.pendingBatchCount()) ?? pendingBatches
+            errorMessage = error.localizedDescription
+            statusMessage = "后台采集已保留，等待系统再次唤醒"
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
+        }
     }
 
     func syncIncrementalEncrypted(
@@ -1250,6 +1309,15 @@ final class PersonalHealthSyncService: ObservableObject {
         pendingBatches = await queue.count()
     }
 
+    /// Must be called from AppDelegate.didFinishLaunching so HealthKit can
+    /// deliver changes during a background cold launch before SwiftUI exists.
+    func registerBackgroundObserversAtLaunch() {
+        guard UserDefaults.standard.bool(
+            forKey: "personalReceiver.healthPermissionRequested"
+        ) else { return }
+        startObservers()
+    }
+
     private func startObservers() {
         guard !observersStarted else { return }
         observersStarted = true
@@ -1264,7 +1332,9 @@ final class PersonalHealthSyncService: ObservableObject {
                         completion()
                         return
                     }
-                    if self.isV2Paired, CloudStorageConfig.load().isConfigured {
+                    // isV2Paired is UI memory and is false on a cold background
+                    // launch. The sync path reloads the Keychain-backed pairing.
+                    if CloudStorageConfig.load().isConfigured {
                         self.enqueueObserverChange(typeIdentifier: sampleType.identifier, completion: completion)
                     } else {
                         completion()
@@ -1273,7 +1343,25 @@ final class PersonalHealthSyncService: ObservableObject {
             }
             healthKit.store.execute(query)
             observerQueries.append(query)
-            healthKit.store.enableBackgroundDelivery(for: sampleType, frequency: .immediate) { _, _ in }
+            healthKit.store.enableBackgroundDelivery(
+                for: sampleType,
+                frequency: .immediate
+            ) { success, error in
+                let key = "personalReceiver.backgroundDelivery.\(sampleType.identifier)"
+                UserDefaults.standard.set(success, forKey: key)
+                if let error {
+                    UserDefaults.standard.set(
+                        error.localizedDescription,
+                        forKey: "\(key).error"
+                    )
+                    print(
+                        "[PersonalHealthSync] background delivery failed for "
+                        + "\(sampleType.identifier): \(error.localizedDescription)"
+                    )
+                } else {
+                    UserDefaults.standard.removeObject(forKey: "\(key).error")
+                }
+            }
         }
     }
 
@@ -1293,6 +1381,13 @@ final class PersonalHealthSyncService: ObservableObject {
             }
             guard let self else { return }
             if self.isSyncing {
+                // Never hold HealthKit's delivery acknowledgement behind an
+                // unrelated foreground sync. Anchors remain unchanged, so the
+                // queued type is safely collected on the next pass.
+                let completions = self.pendingObserverCompletions
+                self.pendingObserverCompletions.removeAll()
+                completions.forEach { $0() }
+                V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
                 self.scheduleObserverDrain(after: 3)
                 return
             }
@@ -1300,10 +1395,7 @@ final class PersonalHealthSyncService: ObservableObject {
             let completions = self.pendingObserverCompletions
             self.pendingObserverTypes.removeAll()
             self.pendingObserverCompletions.removeAll()
-            await self.syncIncrementalEncrypted(
-                changedTypeIdentifiers: types,
-                allowHistoricalBackfill: false
-            )
+            await self.syncFromHealthObserver(changedTypeIdentifiers: types)
             completions.forEach { $0() }
         }
     }

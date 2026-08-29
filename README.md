@@ -28,7 +28,7 @@ Apple Watch / iPhone HealthKit
 - 日常同步最终一致：失败批次保留在手机，重复上传和重复接收不会造成重复入库。
 - Receiver 可运行在 macOS、Linux 或 NAS；Mac mini 只是推荐的常开设备。
 
-完整设计见 [系统架构](docs/system-architecture-v2.md) 和 [加密同步协议](docs/encrypted-sync-protocol-v1.md)。
+完整设计见 [系统架构](docs/system-architecture-v2.md)、[iOS 增量同步策略](docs/ios-sync-strategy.md) 和 [加密同步协议](docs/encrypted-sync-protocol-v1.md)。
 
 ## 当前能力
 
@@ -89,7 +89,7 @@ sudo ./scripts/configure_receiver_linux.sh install
 
 App 只申请读取权限，不会写入或修改健康数据。第一次建议先验证最近 30 天或一年，不要直接回溯全部历史。首次直传期间会显示批次进度，锁屏后的文件上传由后台 `URLSession` 接管；不要从多任务界面强制划掉 App。
 
-iOS 的后台执行时间由系统决定。正确预期是“自动补传并最终一致”，不是固定每隔多少分钟执行一次。请在“设置 → 通用 → 后台 App 刷新”中允许“健康同步”，并关闭低电量模式进行首次后台验证。
+iOS 的后台执行时间由系统决定。App 会在冷启动入口注册 HealthKit Observer，并使用系统后台 `URLSession` 上传 S3 密文包；正确预期仍是“自动补传并最终一致”，不是固定每隔多少分钟执行一次。请在“设置 → 通用 → 后台 App 刷新”中允许“健康同步”，并关闭低电量模式进行首次后台验证。各触发入口与失败恢复规则见 [iOS 增量同步策略](docs/ios-sync-strategy.md)。
 
 ### 3. 配置密文中继
 

@@ -45,12 +45,15 @@ App 不申请 HealthKit 写权限。
 
 ## 后台执行
 
-- HealthKit Observer：数据变化时请求系统唤醒。
+- HealthKit Observer：在 AppDelegate 冷启动入口注册；数据变化时请求系统唤醒，只读取发生变化的 anchored streams。
 - BGAppRefreshTask：由 iOS 自主安排补漏。
 - 进入前台：节流执行补偿同步。
 - Outbox：网络失败、限流或进程中断时保留密文批次。
+- S3 上传：使用文件型后台 `URLSession`；锁屏后可由系统继续，下一次运行消费持久化 HTTP 结果和 Receiver 回执。
 
 iOS 不承诺固定调度时间。请在系统“后台 App 刷新”中启用“健康同步”，且不要从多任务界面强制划掉 App。
+
+完整触发顺序、增量游标、确认语义和限制见仓库根目录 [iOS 增量同步策略](../../docs/ios-sync-strategy.md)。
 
 ## AltStore
 

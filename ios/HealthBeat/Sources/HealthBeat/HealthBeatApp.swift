@@ -1,13 +1,26 @@
 import SwiftUI
 import UIKit
 
+@MainActor
 final class HealthBeatAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        // HealthKit can cold-launch the process before SwiftUI creates a scene.
+        // Observer queries must exist now, not after ContentView.task/prepare().
+        V2BackgroundSyncCoordinator.shared.register()
+        PersonalHealthSyncService.shared.registerBackgroundObserversAtLaunch()
+        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 15 * 60)
+        return true
+    }
+
     func application(
         _ application: UIApplication,
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
-        BackgroundDirectTransferCenter.shared.handleEvents(
+        BackgroundHTTPTransferCenter.shared.handleEvents(
             identifier: identifier,
             completionHandler: completionHandler
         )

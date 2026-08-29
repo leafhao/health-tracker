@@ -66,6 +66,7 @@ struct PreparedRelayPack {
 
 actor CloudRelayTransport {
     private let session: URLSession
+    private let backgroundTransfers = BackgroundHTTPTransferCenter.shared
     private var nextRequestNotBefore = Date.distantPast
     private var rateLimitedUntil: Date?
     private var consecutiveRateLimits = 0
@@ -133,7 +134,7 @@ actor CloudRelayTransport {
             candidates.append(batch)
         }
 
-        let packs = try Self.preparePacks(candidates: candidates)
+        let packs = try Self.preparePacks(candidates: candidates, stableIDs: true)
         var uploaded = 0
         for pack in packs {
             // Only one bounded Part is materialized at a time. A large historical
@@ -154,11 +155,19 @@ actor CloudRelayTransport {
                         config: config,
                         credentials: credentials
                     )
-                    _ = try await perform(
-                        request,
-                        accepted: [200, 201, 204],
+                    try await waitForRequestSlot(
                         minimumSpacing: config.usesCSTCloudCompatibility ? 1.25 : 0
                     )
+                    let (responseBody, response) = try await backgroundTransfers.upload(
+                        request: request,
+                        body: body,
+                        transferID: Self.backgroundTransferID(
+                            config: config,
+                            objectKey: objectKey,
+                            pack: pack
+                        )
+                    )
+                    try Self.validateUploadResponse(response, body: responseBody)
                 case .webDAV:
                     try await ensureWebDAVCollections(
                         config: config,
@@ -195,6 +204,57 @@ actor CloudRelayTransport {
             awaitingReceiver: counts.awaitingReceiver,
             deferredUntil: nil
         )
+    }
+
+    /// Schedule one stable S3 pack with the system background URLSession and
+    /// return as soon as iOS owns the file. Upload markers are written only when
+    /// a later foreground/BG refresh consumes the persisted HTTP result.
+    func schedulePending(
+        outbox: EncryptedHealthOutbox,
+        pairing: HealthPairingMaterial,
+        config: CloudStorageConfig,
+        credentials: CloudStorageCredentials
+    ) async throws -> Int {
+        try validate(config: config, credentials: credentials)
+        guard config.provider == .s3 else { return 0 }
+        var candidates: [PendingEncryptedBatch] = []
+        for batch in try await outbox.pending() {
+            if let marker = try await outbox.uploadMarker(for: batch),
+               marker.provider == config.provider.rawValue {
+                continue
+            }
+            candidates.append(batch)
+        }
+        guard let pack = try Self.preparePacks(
+            candidates: candidates,
+            stableIDs: true
+        ).first else { return 0 }
+        let body = try Self.encode(pack: pack, pairing: pairing)
+        let objectKey = Self.objectKey(config: config, pairing: pairing, pack: pack)
+        let url = try S3RequestSigner.url(config: config, objectKey: objectKey)
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try S3RequestSigner.sign(
+            request: &request,
+            body: body,
+            config: config,
+            credentials: credentials
+        )
+        try await waitForRequestSlot(
+            minimumSpacing: config.usesCSTCloudCompatibility ? 1.25 : 0
+        )
+        try await backgroundTransfers.schedule(
+            request: request,
+            body: body,
+            transferID: Self.backgroundTransferID(
+                config: config,
+                objectKey: objectKey,
+                pack: pack
+            )
+        )
+        return pack.batches.count
     }
 
     func reconcileReceipts(
@@ -294,6 +354,36 @@ actor CloudRelayTransport {
             supplied,
             authenticating: material,
             using: SymmetricKey(data: key)
+        )
+    }
+
+    private static func backgroundTransferID(
+        config: CloudStorageConfig,
+        objectKey: String,
+        pack: PreparedRelayPack
+    ) -> String {
+        let endpoint = config.normalizedEndpoint?.absoluteString ?? ""
+        let material = [config.provider.rawValue, endpoint, config.bucket, objectKey]
+            .joined(separator: "\0")
+        let suffix = SHA256.hash(data: Data(material.utf8)).prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "cloud-\(pack.id)-\(suffix)"
+    }
+
+    private static func validateUploadResponse(
+        _ response: HTTPURLResponse,
+        body: Data
+    ) throws {
+        if [200, 201, 204].contains(response.statusCode) { return }
+        if response.statusCode == 429 {
+            throw CloudStorageError.rateLimited(
+                rateLimitRetryDate(response: response, consecutiveRateLimits: 1)
+            )
+        }
+        throw CloudStorageError.http(
+            response.statusCode,
+            String(data: body, encoding: .utf8) ?? ""
         )
     }
 
