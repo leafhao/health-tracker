@@ -325,6 +325,33 @@ enum SyncError: Error, LocalizedError {
     }
 }
 
+struct ShortcutIncrementalSyncResult: Sendable {
+    let records: Int
+    let pendingBatches: Int
+    let uploadScheduled: Bool
+    let wasAlreadyRunning: Bool
+}
+
+enum ShortcutIncrementalSyncError: Error, LocalizedError {
+    case healthPermissionRequired
+    case pairingRequired
+    case initialSyncIncomplete
+    case cloudNotConfigured
+
+    var errorDescription: String? {
+        switch self {
+        case .healthPermissionRequired:
+            return "请先打开健康同步 App 并授予健康数据读取权限"
+        case .pairingRequired:
+            return "请先在健康同步 App 中完成 Receiver 安全配对"
+        case .initialSyncIncomplete:
+            return "请先在健康同步 App 中完成首次历史同步"
+        case .cloudNotConfigured:
+            return "请先在健康同步 App 中配置云存储"
+        }
+    }
+}
+
 private struct WireEnvelope<T: Encodable>: Encodable { let records: [T] }
 
 @MainActor
@@ -707,6 +734,82 @@ final class PersonalHealthSyncService: ObservableObject {
         else { return false }
         await syncIncrementalEncrypted(allowHistoricalBackfill: false)
         return errorMessage == nil
+    }
+
+    /// A bounded entry point for Shortcuts personal automations. It reads all
+    /// anchored streams, persists new encrypted envelopes, and hands one S3
+    /// pack to the system background URLSession without waiting for Receiver.
+    func performShortcutIncrementalSync() async throws -> ShortcutIncrementalSyncResult {
+        registerBackgroundObserversAtLaunch()
+        guard UserDefaults.standard.bool(
+            forKey: "personalReceiver.healthPermissionRequested"
+        ) else {
+            throw ShortcutIncrementalSyncError.healthPermissionRequired
+        }
+        guard isInitialDirectBootstrapComplete else {
+            throw ShortcutIncrementalSyncError.initialSyncIncomplete
+        }
+        let cloud = CloudStorageConfig.load()
+        guard cloud.isConfigured else {
+            throw ShortcutIncrementalSyncError.cloudNotConfigured
+        }
+        if isSyncing {
+            return ShortcutIncrementalSyncResult(
+                records: 0,
+                pendingBatches: (try? await v2Collector.pendingBatchCount()) ?? pendingBatches,
+                uploadScheduled: false,
+                wasAlreadyRunning: true
+            )
+        }
+
+        isSyncing = true
+        uploadedRecords = 0
+        errorMessage = nil
+        defer { isSyncing = false }
+        do {
+            isV2Paired = await HealthV2PairingService.shared.isPaired
+            guard isV2Paired else { throw ShortcutIncrementalSyncError.pairingRequired }
+            let pairing = try await HealthV2PairingService.shared.load()
+            uploadedRecords = try await v2Collector.collect(
+                quantityDescriptors: quantityDescriptors,
+                changedTypeIdentifiers: nil,
+                bootstrapCutoff: Date(),
+                pairing: pairing.material,
+                signingPrivateKey: pairing.signingPrivateKey
+            )
+
+            var uploadScheduled = false
+            if cloud.provider == .s3 {
+                uploadScheduled = try await v2Collector.scheduleCloudUpload(
+                    config: cloud,
+                    credentials: CloudStorageCredentials.load(for: .s3),
+                    pairing: pairing.material
+                ) > 0
+                lastEndpoint = cloud.provider.displayName
+            }
+            pendingBatches = try await v2Collector.pendingBatchCount()
+            await refreshCloudStatus()
+            if uploadScheduled {
+                statusMessage = "快捷指令已采集增量并交给 iOS 后台上传"
+            } else if cloud.provider == .s3 {
+                statusMessage = "快捷指令增量检查完成；没有新的 S3 包需要提交"
+            } else {
+                statusMessage = "快捷指令已加密保存增量，等待后台刷新续传"
+            }
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
+            return ShortcutIncrementalSyncResult(
+                records: uploadedRecords,
+                pendingBatches: pendingBatches,
+                uploadScheduled: uploadScheduled,
+                wasAlreadyRunning: false
+            )
+        } catch {
+            pendingBatches = (try? await v2Collector.pendingBatchCount()) ?? pendingBatches
+            errorMessage = error.localizedDescription
+            statusMessage = "快捷指令同步未完成，已保留本地密文"
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
+            throw error
+        }
     }
 
     /// HealthKit background delivery has a short execution budget. Read only

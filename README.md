@@ -101,7 +101,7 @@ iOS 的后台执行时间由系统决定。App 会在冷启动入口注册 Healt
 
 ## 日常使用
 
-- iPhone：让 App 保持后台刷新权限，不需要每天手动打开；偶尔进入首页可触发补漏并查看待上传数量。
+- iPhone：让 App 保持后台刷新权限，不需要每天手动打开；可把 App 的“立即增量同步”快捷指令动作绑定到家、公司或 Wi-Fi 作为停靠点保底，偶尔进入首页可触发补漏并查看待上传数量。
 - Receiver：正式安装后由 Web API、规整/面板物化 Worker、云中继 Worker 三个独立进程组成；维护和备份另由定时任务执行。
 - 面板：在 Receiver 本机访问 `/dashboard`；不要把 8787 端口映射到公网。
 - Agent：同机程序访问 `http://127.0.0.1:8787/api/v1/agent/catalog` 和相关只读接口，见 [Agent API](docs/agent-api.md)。
