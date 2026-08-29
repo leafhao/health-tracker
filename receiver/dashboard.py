@@ -22,6 +22,7 @@ from .dashboard_materializer import (
 from .database import Database
 from .identity import ReceiverIdentity
 from .settings import AppPaths
+from .version import version_payload
 
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -466,6 +467,7 @@ def mount_dashboard(
         ]
         freshness = {"last_received_at": max(latest_received, default=None)}
         return {
+            "version": version_payload(),
             "admin_identity": admin_identity,
             "available_dates": _available_dates(database),
             "freshness": freshness,

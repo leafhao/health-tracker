@@ -851,8 +851,9 @@ final class V2HealthCollector: @unchecked Sendable {
         let domains = ["sleep", "workout", "workout_route", "activity_summary"]
         let payload = DeviceCapabilitiesPayload(
             deviceID: pairing.deviceID,
-            appVersion: Bundle.main.object(
-                forInfoDictionaryKey: "CFBundleShortVersionString"
+            appVersion: (
+                Bundle.main.object(forInfoDictionaryKey: "HealthTrackerProductVersion")
+                    ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
             ) as? String,
             platformVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             healthDataAvailable: HKHealthStore.isHealthDataAvailable(),

@@ -2,6 +2,8 @@
 
 Health Tracker 是一个开源、自托管的个人健康数据系统。iPhone 只读 Apple Health/HealthKit，把增量数据在手机端加密后同步到你自己的 Receiver；Receiver 负责去重、规整、按日汇总、健康面板和本机 Agent API。
 
+当前公开测试版本：[`v0.1.0-beta.1`](CHANGELOG.md)。`0.x` 阶段可能调整接口和规整规则，升级前请阅读变更记录并保留 Receiver 加密备份。
+
 > 本项目不是医疗器械，不提供诊断或治疗建议。健康结论应结合长期趋势、个人情况和专业医疗意见。
 
 ## 系统组成
@@ -155,6 +157,7 @@ health-tracker/
 python3 -m venv .venv
 .venv/bin/pip install -r receiver/requirements.txt
 .venv/bin/python -m unittest discover -s receiver/tests -v
+python3 scripts/check_release_version.py
 ```
 
 iOS 编译检查：
@@ -163,8 +166,16 @@ iOS 编译检查：
 xcodebuild -project 'ios/HealthBeat/Health Beat.xcodeproj' \
   -scheme 'Health Beat' -sdk iphonesimulator \
   -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO build
+CODE_SIGNING_ALLOWED=NO build
 ```
+
+## 版本与发布
+
+- 根目录 [`VERSION`](VERSION) 是产品发布版本基线，采用 Semantic Versioning。
+- iOS Bundle 使用 Apple 要求的纯数字短版本，同时在 App 内展示完整产品版本（例如 `0.1.0-beta.1`）。
+- 加密同步协议 `schema_version` 和 SQLite migration 版本独立演进，不随产品补丁版本自动改变。
+- 日常修复继续以小提交进入 `main`；只有通过 Receiver 测试和 iOS 无签名编译的提交才打 `v*` 标签。
+- 推送版本标签后，GitHub Actions 会验证标签与代码版本一致，并创建 GitHub Release。具体变化见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 已知限制
 

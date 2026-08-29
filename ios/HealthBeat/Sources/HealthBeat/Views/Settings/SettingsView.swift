@@ -237,7 +237,10 @@ struct SettingsView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        (
+            Bundle.main.infoDictionary?["HealthTrackerProductVersion"]
+                ?? Bundle.main.infoDictionary?["CFBundleShortVersionString"]
+        ) as? String ?? "0.0.0+unknown"
     }
 
     private func iconBox(_ systemName: String, color: Color) -> some View {

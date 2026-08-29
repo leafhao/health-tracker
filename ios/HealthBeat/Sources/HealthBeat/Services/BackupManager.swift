@@ -98,7 +98,10 @@ final class BackupManager {
             }
         }
 
-        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let appVersion = (
+            Bundle.main.infoDictionary?["HealthTrackerProductVersion"]
+                ?? Bundle.main.infoDictionary?["CFBundleShortVersionString"]
+        ) as? String ?? "0.0.0+unknown"
         let metadata = BackupMetadata(
             id: UUID(),
             createdAt: Date(),

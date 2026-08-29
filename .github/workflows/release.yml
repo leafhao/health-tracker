@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  receiver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: receiver/requirements.txt
+      - run: python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+      - run: pip install -r receiver/requirements.txt
+      - run: python -m unittest discover -s receiver/tests -v
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+      - name: Build iOS app without signing
+        run: >-
+          xcodebuild
+          -project 'ios/HealthBeat/Health Beat.xcodeproj'
+          -scheme 'Health Beat'
+          -configuration Release
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO
+          build
+
+  publish:
+    needs: [receiver, ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          args=("$TAG" --verify-tag --generate-notes --title "$TAG")
+          if [[ "$TAG" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"

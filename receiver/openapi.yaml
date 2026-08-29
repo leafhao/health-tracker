@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Personal Health Receiver
-  version: 0.1.0
+  version: 0.1.0-beta.1
   description: HealthBeat-compatible, idempotent Apple Health ingest API.
 servers:
   - url: http://192.168.1.50:8787

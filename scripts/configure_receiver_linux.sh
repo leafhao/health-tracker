@@ -447,6 +447,13 @@ install_release() {
     sudo install -d -m 755 "$release_dir" "$release_dir/scripts"
     sudo cp -a "$project_dir/receiver" "$release_dir/receiver"
     sudo cp -a "$project_dir/schemas" "$release_dir/schemas"
+    sudo install -m 644 "$project_dir/VERSION" "$release_dir/VERSION"
+    local release_commit="$revision"
+    if command -v git >/dev/null 2>&1; then
+        release_commit="$(git -C "$project_dir" rev-parse HEAD 2>/dev/null || printf '%s' "$revision")"
+    fi
+    printf '%s\n' "$release_commit" | sudo tee "$release_dir/RELEASE_COMMIT" >/dev/null
+    sudo chmod 644 "$release_dir/RELEASE_COMMIT"
     sudo install -m 755 "$project_dir/scripts/secure_backup.py" "$release_dir/scripts/secure_backup.py"
     sudo install -m 755 "$project_dir/scripts/receiver_watchdog_linux.sh" "$release_dir/scripts/receiver_watchdog_linux.sh"
     sudo install -m 755 "$project_dir/scripts/receiver_maintenance_linux.sh" "$release_dir/scripts/receiver_maintenance_linux.sh"

@@ -387,7 +387,12 @@ class NormalizerTests(unittest.TestCase):
         self.assertIn("健康数据面板", local_dashboard.text)
         self.assertIn("'elliptical':'椭圆机训练'", local_dashboard.text)
         self.assertIn("workoutTypeLabel(w.activity_type)", local_dashboard.text)
-        self.assertEqual(self.client.get("/api/v1/dashboard/status").status_code, 200)
+        dashboard_status = self.client.get("/api/v1/dashboard/status")
+        self.assertEqual(dashboard_status.status_code, 200)
+        self.assertEqual(
+            dashboard_status.json()["version"]["product_version"],
+            "0.1.0-beta.1",
+        )
         pairing = self.client.post("/api/v2/admin/pairing-sessions")
         self.assertEqual(pairing.status_code, 200)
         self.assertRegex(pairing.json()["pairing_code"], r"^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$")

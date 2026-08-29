@@ -39,6 +39,7 @@ from .retention import configured_retention_days
 from .settings import AppPaths
 from .sync_crypto import EnvelopeError, peek_header
 from .v2_ingestion import BatchIngestionService, IngestionError
+from .version import GIT_COMMIT, PRODUCT_VERSION, version_payload
 from .worker import (
     CLOUD_RELAY_WORKER,
     NORMALIZATION_WORKER,
@@ -222,7 +223,7 @@ def create_app(
                 with suppress(asyncio.CancelledError):
                     await cloud_relay_task
 
-    app = FastAPI(title="Personal Health Receiver", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Personal Health Receiver", version=PRODUCT_VERSION, lifespan=lifespan)
     app.state.database = database
     app.state.paths = paths
     app.state.identity = identity
@@ -239,6 +240,7 @@ def create_app(
         return {
             "status": "ok",
             "server_time": datetime.now(timezone.utc).isoformat(),
+            **version_payload(),
             "schema_version": 2,
             "max_batch": 500,
         }
@@ -314,6 +316,8 @@ def create_app(
             )
         payload = {
             "status": "ready" if not failures else "not_ready",
+            "product_version": PRODUCT_VERSION,
+            "git_commit": GIT_COMMIT,
             "database": "ok" if database_ok else "unavailable",
             "normalization_worker_heartbeat_age_seconds": (
                 round(normalization_age, 3) if normalization_age is not None else None

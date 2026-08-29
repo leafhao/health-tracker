@@ -28,7 +28,10 @@ class ReceiverTests(unittest.TestCase):
     def test_health_is_public(self) -> None:
         response = self.client.get("/api/v1/healthbeat/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["product_version"], "0.1.0-beta.1")
+        self.assertTrue(payload["git_commit"])
 
     def test_ingest_requires_token(self) -> None:
         response = self.client.post("/api/v1/healthbeat/quantity-samples", json={"records": []})
