@@ -190,6 +190,57 @@ final class BackgroundHTTPTransferCenter: NSObject, URLSessionDataDelegate, URLS
         task.resume()
     }
 
+    /// Remove a discretionary transfer before an explicit user-triggered
+    /// foreground attempt uploads the same stable S3 object. Cancellation is
+    /// bounded; any late delegate callback is harmless and is discarded again
+    /// after a successful immediate upload.
+    func cancelAndDiscard(transferID: String) async {
+        let matching = await allTasks().filter { $0.taskDescription == transferID }
+        matching.forEach { $0.cancel() }
+        for _ in 0..<10 {
+            if (await allTasks()).allSatisfy({ $0.taskDescription != transferID }) {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        try? FileManager.default.removeItem(at: bodyURL(transferID: transferID))
+        try? FileManager.default.removeItem(at: resultURL(transferID: transferID))
+    }
+
+    /// An explicit shortcut upload supersedes older discretionary S3 tasks,
+    /// because its stable pack includes every still-unmarked batch. LAN direct
+    /// uploads use the `direct-` prefix and are intentionally unaffected.
+    func cancelAndDiscardCloudTransfers() async {
+        let matching = await allTasks().filter {
+            $0.taskDescription?.hasPrefix("cloud-") == true
+        }
+        matching.forEach { $0.cancel() }
+        for _ in 0..<10 {
+            if (await allTasks()).allSatisfy({
+                $0.taskDescription?.hasPrefix("cloud-") != true
+            }) {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for file in files where file.lastPathComponent.hasPrefix("cloud-") {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    /// Consume a completion persisted while the process was suspended. The
+    /// result file is removed exactly once; callers either commit its upload
+    /// marker or safely schedule the stable pack again.
+    func consumeCompletedResult(
+        transferID: String
+    ) throws -> (Data, HTTPURLResponse)? {
+        try consumeResult(transferID: transferID)
+    }
+
     private func allTasks() async -> [URLSessionTask] {
         await withCheckedContinuation { continuation in
             session.getAllTasks { continuation.resume(returning: $0) }
@@ -746,6 +797,21 @@ final class V2HealthCollector: @unchecked Sendable {
             pairing: pairing,
             config: config,
             credentials: credentials
+        )
+    }
+
+    func uploadOneCloudPackImmediately(
+        config: CloudStorageConfig,
+        credentials: CloudStorageCredentials,
+        pairing: HealthPairingMaterial,
+        timeout: TimeInterval = 30
+    ) async throws -> Int {
+        try await cloudTransport.uploadOnePendingImmediately(
+            outbox: outbox,
+            pairing: pairing,
+            config: config,
+            credentials: credentials,
+            timeout: timeout
         )
     }
 

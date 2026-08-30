@@ -328,6 +328,7 @@ enum SyncError: Error, LocalizedError {
 struct ShortcutIncrementalSyncResult: Sendable {
     let records: Int
     let pendingBatches: Int
+    let immediatelyUploadedBatches: Int
     let uploadScheduled: Bool
     let wasAlreadyRunning: Bool
 }
@@ -412,6 +413,8 @@ final class PersonalHealthSyncService: ObservableObject {
     private static let recentDomainRepairVersion = "30-days-semantic-sleep-workout-activity-v2"
     private static let deferredShortcutSyncKey =
         "personalReceiver.v2.deferredShortcutSync"
+    private static let shortcutDiagnosticPrefix =
+        "personalReceiver.v2.shortcutDiagnostic."
 
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -760,6 +763,7 @@ final class PersonalHealthSyncService: ObservableObject {
             return ShortcutIncrementalSyncResult(
                 records: 0,
                 pendingBatches: (try? await v2Collector.pendingBatchCount()) ?? pendingBatches,
+                immediatelyUploadedBatches: 0,
                 uploadScheduled: false,
                 wasAlreadyRunning: true
             )
@@ -781,28 +785,97 @@ final class PersonalHealthSyncService: ObservableObject {
                 signingPrivateKey: pairing.signingPrivateKey
             )
 
+            var immediatelyUploadedBatches = 0
             var uploadScheduled = false
+            var immediateUploadError: Error?
             if cloud.provider == .s3 {
-                uploadScheduled = try await v2Collector.scheduleCloudUpload(
-                    config: cloud,
-                    credentials: CloudStorageCredentials.load(for: .s3),
-                    pairing: pairing.material
-                ) > 0
+                let credentials = CloudStorageCredentials.load(for: .s3)
+                do {
+                    immediatelyUploadedBatches = try await v2Collector
+                        .uploadOneCloudPackImmediately(
+                            config: cloud,
+                            credentials: credentials,
+                            pairing: pairing.material,
+                            timeout: 30
+                        )
+                } catch {
+                    immediateUploadError = error
+                }
+
+                // If the immediate pack succeeded this schedules only a later
+                // partition, if any. If it failed, this hands the same stable
+                // pack back to iOS. A known S3 rate limit is left local until
+                // the already-scheduled BG refresh reaches its retry window.
+                let isRateLimited: Bool
+                if let cloudError = immediateUploadError as? CloudStorageError,
+                   case .rateLimited = cloudError {
+                    isRateLimited = true
+                } else {
+                    isRateLimited = false
+                }
+                if !isRateLimited {
+                    do {
+                        uploadScheduled = try await v2Collector.scheduleCloudUpload(
+                            config: cloud,
+                            credentials: credentials,
+                            pairing: pairing.material
+                        ) > 0
+                    } catch {
+                        if immediateUploadError == nil { immediateUploadError = error }
+                    }
+                }
                 lastEndpoint = cloud.provider.displayName
             }
             pendingBatches = try await v2Collector.pendingBatchCount()
             await refreshCloudStatus()
-            if uploadScheduled {
-                statusMessage = "快捷指令已采集增量并交给 iOS 后台上传"
+            if immediatelyUploadedBatches > 0 {
+                statusMessage = uploadScheduled
+                    ? "快捷指令已立即上传一个加密包；其余批次已交给 iOS 后台续传"
+                    : "快捷指令已立即上传加密包，等待 Receiver 确认"
+            } else if uploadScheduled {
+                statusMessage = "快捷指令即时上传未完成；密文已交给 iOS 后台续传"
             } else if cloud.provider == .s3 {
-                statusMessage = "快捷指令增量检查完成；没有新的 S3 包需要提交"
+                statusMessage = pendingBatches > 0
+                    ? "快捷指令增量已加密保存在手机，等待后台重试"
+                    : "快捷指令增量检查完成；没有新的 S3 包需要提交"
             } else {
                 statusMessage = "快捷指令已加密保存增量，等待后台刷新续传"
+            }
+            if let immediateUploadError, pendingBatches > 0 {
+                cloudStatusMessage = "即时上传未完成：\(immediateUploadError.localizedDescription)；密文未丢失"
+            }
+            let defaults = UserDefaults.standard
+            let diagnosticPrefix = Self.shortcutDiagnosticPrefix
+            defaults.set(Date(), forKey: diagnosticPrefix + "finishedAt")
+            defaults.set(uploadedRecords, forKey: diagnosticPrefix + "records")
+            defaults.set(pendingBatches, forKey: diagnosticPrefix + "pendingBatches")
+            defaults.set(
+                immediatelyUploadedBatches,
+                forKey: diagnosticPrefix + "immediatelyUploadedBatches"
+            )
+            defaults.set(uploadScheduled, forKey: diagnosticPrefix + "backgroundScheduled")
+            if let immediateUploadError {
+                let error = immediateUploadError as NSError
+                defaults.set(error.domain, forKey: diagnosticPrefix + "errorDomain")
+                defaults.set(error.code, forKey: diagnosticPrefix + "errorCode")
+                defaults.set(
+                    immediateUploadError.localizedDescription,
+                    forKey: diagnosticPrefix + "errorDescription"
+                )
+            } else {
+                defaults.removeObject(forKey: diagnosticPrefix + "errorDomain")
+                defaults.removeObject(forKey: diagnosticPrefix + "errorCode")
+                defaults.removeObject(forKey: diagnosticPrefix + "errorDescription")
+            }
+            if immediatelyUploadedBatches > 0 {
+                lastSyncDate = Date()
+                defaults.set(lastSyncDate, forKey: "personalReceiver.lastSyncDate")
             }
             V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
             return ShortcutIncrementalSyncResult(
                 records: uploadedRecords,
                 pendingBatches: pendingBatches,
+                immediatelyUploadedBatches: immediatelyUploadedBatches,
                 uploadScheduled: uploadScheduled,
                 wasAlreadyRunning: false
             )
