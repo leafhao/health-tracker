@@ -10,20 +10,38 @@ Health Tracker 是一个开源、自托管的个人健康数据系统。iPhone �
 
 ```mermaid
 flowchart TB
-    health["Apple Watch / iPhone<br/>HealthKit"]
-    collector["iPhone Collector<br/>增量读取 · 持久化队列"]
-    encryption["端到端保护<br/>HPKE 加密 · Ed25519 签名"]
-    transport["密文传输<br/>局域网直传：首次回溯 / 应急<br/>S3 / WebDAV：后续增量"]
-    receiver["Receiver + SQLite<br/>验签 · 解密 · 去重 · 规整 · 物化快照"]
-    outputs["本地输出<br/>健康数据面板 · 本机 Agent API · JSON 导出"]
+    subgraph source["手机中的健康数据从哪里来"]
+        direction LR
+        watch["Apple Watch<br/>睡眠、心率、锻炼"] --> health["iPhone「健康」App<br/>统一汇总健康数据"]
+        iphone["iPhone 和其他健康 App<br/>活动及补充数据"] --> health
+    end
 
-    health --> collector --> encryption --> transport --> receiver --> outputs
+    subgraph app["iPhone「健康同步」App"]
+        direction LR
+        read["读取新增数据"] --> organize["整理并暂存在手机"] --> encrypt["加密后准备同步"]
+    end
+
+    subgraph transfer["数据如何传到电脑"]
+        direction LR
+        direct["同一局域网直接传输<br/>首次导入或手动补传"]
+        cloud["通过云存储中转<br/>S3 / WebDAV · 日常自动同步"]
+    end
+
+    subgraph computer["电脑端 Health Tracker"]
+        direction LR
+        receive["接收并解密数据"] --> save["去重、归类和保存"] --> use["查看健康面板<br/>提供 Agent 接口和 JSON 导出"]
+    end
+
+    health --> read
+    encrypt --> direct --> receive
+    encrypt --> cloud --> receive
 ```
 
-- 云存储只能看到加密包、随机设备标识和传输状态，不能读取健康明文。
-- Receiver 保存原始事件、规范化结果和可重建的面板快照；面板切换日期只读快照，不实时扫描全库。
-- 日常同步最终一致：失败批次保留在手机，重复上传和重复接收不会造成重复入库。
-- Receiver 可运行在 macOS、Linux 或 NAS；Mac mini 只是推荐的常开设备。
+- 健康数据来自 iPhone“健康”App；“健康同步”App 只读取，不会修改健康数据。
+- 首次导入可以在同一局域网内直接传输，之后的新增数据通过加密云存储自动中转。
+- 网络中断时，尚未传完的数据会留在手机中，恢复后继续同步。
+- 电脑端负责解密、去重、归类和保存，并提供健康面板、Agent 接口和 JSON 导出。
+- 电脑端可运行在 macOS、Linux 或 NAS；Mac mini 只是推荐的常开设备。
 
 完整设计见 [系统架构](docs/system-architecture-v2.md)、[iOS 增量同步策略](docs/ios-sync-strategy.md) 和 [加密同步协议](docs/encrypted-sync-protocol-v1.md)。
 
