@@ -120,7 +120,13 @@ iOS 的后台执行时间由系统决定。App 会在冷启动入口注册 Healt
 - 面板：在 Receiver 本机访问 `/dashboard`；不要把 8787 端口映射到公网。
 - Agent：同机程序访问 `http://127.0.0.1:8787/api/v1/agent/catalog` 和相关只读接口，见 [Agent API](docs/agent-api.md)。
 
-## AltStore Classic（可选）
+## 免费签名续期
+
+HealthKit App 推荐使用长期在线的 Mac mini 通过 Xcode Automatic Signing 自动重签并
+覆盖安装。仓库提供 launchd 安装脚本、72 小时安全窗口、离线重试、entitlement 验证和
+失败通知，详见 [Mac mini + Xcode 自动续签](docs/xcode-personal-team-autorenew.md)。
+
+## AltStore Classic（实验性）
 
 Xcode 免费签名通常只有 7 天。完成 Xcode 真机功能验证后，可以测试 AltStore Classic 自动续签。AltServer 应安装在长期在线的 Mac mini，并启用 Finder 的 Wi‑Fi 同步。
 
