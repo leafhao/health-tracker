@@ -325,12 +325,9 @@ enum SyncError: Error, LocalizedError {
     }
 }
 
-struct ShortcutIncrementalSyncResult: Sendable {
-    let records: Int
-    let pendingBatches: Int
-    let immediatelyUploadedBatches: Int
-    let uploadScheduled: Bool
-    let wasAlreadyRunning: Bool
+struct ShortcutSyncRequestResult: Sendable {
+    let wasAlreadyPending: Bool
+    let syncWasRunning: Bool
 }
 
 enum ShortcutIncrementalSyncError: Error, LocalizedError {
@@ -413,6 +410,8 @@ final class PersonalHealthSyncService: ObservableObject {
     private static let recentDomainRepairVersion = "30-days-semantic-sleep-workout-activity-v2"
     private static let deferredShortcutSyncKey =
         "personalReceiver.v2.deferredShortcutSync"
+    private static let deferredShortcutSyncRequestedAtKey =
+        "personalReceiver.v2.deferredShortcutSync.requestedAt"
     private static let shortcutDiagnosticPrefix =
         "personalReceiver.v2.shortcutDiagnostic."
 
@@ -421,6 +420,7 @@ final class PersonalHealthSyncService: ObservableObject {
         encoder.outputFormatting = [.withoutEscapingSlashes]
         return encoder
     }()
+    private var shortcutKickTask: Task<Void, Never>?
 
     private let priorityQuantityIDs: Set<String> = [
         HKQuantityTypeIdentifier.stepCount.rawValue,
@@ -737,14 +737,35 @@ final class PersonalHealthSyncService: ObservableObject {
               isV2Paired,
               UserDefaults.standard.bool(forKey: "personalReceiver.healthPermissionRequested")
         else { return false }
+        let defaults = UserDefaults.standard
+        let requestedAt = defaults.object(
+            forKey: Self.deferredShortcutSyncRequestedAtKey
+        ) as? Date
         await syncIncrementalEncrypted(allowHistoricalBackfill: false)
-        return errorMessage == nil
+        let success = errorMessage == nil && !Task.isCancelled
+        if success,
+           defaults.bool(forKey: Self.deferredShortcutSyncKey),
+           (requestedAt == nil || requestedAt == defaults.object(
+               forKey: Self.deferredShortcutSyncRequestedAtKey
+           ) as? Date) {
+            defaults.removeObject(forKey: Self.deferredShortcutSyncKey)
+            defaults.removeObject(forKey: Self.deferredShortcutSyncRequestedAtKey)
+            defaults.set("completed", forKey: Self.shortcutDiagnosticPrefix + "state")
+            defaults.set(Date(), forKey: Self.shortcutDiagnosticPrefix + "finishedAt")
+            defaults.set(uploadedRecords, forKey: Self.shortcutDiagnosticPrefix + "records")
+            defaults.set(pendingBatches, forKey: Self.shortcutDiagnosticPrefix + "pendingBatches")
+            V2BackgroundSyncCoordinator.shared.scheduleNext()
+        } else if defaults.bool(forKey: Self.deferredShortcutSyncKey) {
+            defaults.set("waiting", forKey: Self.shortcutDiagnosticPrefix + "state")
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
+        }
+        return success
     }
 
-    /// A bounded entry point for Shortcuts personal automations. It reads all
-    /// anchored streams, persists new encrypted envelopes, and hands one S3
-    /// pack to the system background URLSession without waiting for Receiver.
-    func performShortcutIncrementalSync() async throws -> ShortcutIncrementalSyncResult {
+    /// Shortcuts is a durable trigger, not a synchronization executor. Persist
+    /// the request and return immediately; the app consumes it with whatever
+    /// execution time iOS grants now or during a later background refresh.
+    func requestShortcutIncrementalSync() throws -> ShortcutSyncRequestResult {
         registerBackgroundObserversAtLaunch()
         guard UserDefaults.standard.bool(
             forKey: "personalReceiver.healthPermissionRequested"
@@ -758,134 +779,37 @@ final class PersonalHealthSyncService: ObservableObject {
         guard cloud.isConfigured else {
             throw ShortcutIncrementalSyncError.cloudNotConfigured
         }
-        if isSyncing {
-            requestDeferredShortcutSync()
-            return ShortcutIncrementalSyncResult(
-                records: 0,
-                pendingBatches: (try? await v2Collector.pendingBatchCount()) ?? pendingBatches,
-                immediatelyUploadedBatches: 0,
-                uploadScheduled: false,
-                wasAlreadyRunning: true
-            )
+        let defaults = UserDefaults.standard
+        let wasAlreadyPending = defaults.bool(forKey: Self.deferredShortcutSyncKey)
+        let now = Date()
+        defaults.set(true, forKey: Self.deferredShortcutSyncKey)
+        defaults.set(now, forKey: Self.deferredShortcutSyncRequestedAtKey)
+        defaults.set("queued", forKey: Self.shortcutDiagnosticPrefix + "state")
+        defaults.set(now, forKey: Self.shortcutDiagnosticPrefix + "requestedAt")
+        defaults.removeObject(forKey: Self.shortcutDiagnosticPrefix + "errorDomain")
+        defaults.removeObject(forKey: Self.shortcutDiagnosticPrefix + "errorCode")
+        defaults.removeObject(forKey: Self.shortcutDiagnosticPrefix + "errorDescription")
+        statusMessage = isSyncing
+            ? "同步请求已记录；当前任务结束后继续"
+            : "同步请求已提交，等待 App 后台执行"
+
+        // This is the durable guarantee. iOS chooses the actual launch time.
+        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 1)
+
+        // Best effort only: once AppIntent returns its result, use any process
+        // time iOS keeps available. The persisted request remains if suspended.
+        if !isSyncing, shortcutKickTask == nil {
+            shortcutKickTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self else { return }
+                _ = await self.performBackgroundRefresh()
+                self.shortcutKickTask = nil
+            }
         }
-
-        isSyncing = true
-        uploadedRecords = 0
-        errorMessage = nil
-        defer { finishSyncAndScheduleDeferredShortcut() }
-        do {
-            isV2Paired = await HealthV2PairingService.shared.isPaired
-            guard isV2Paired else { throw ShortcutIncrementalSyncError.pairingRequired }
-            let pairing = try await HealthV2PairingService.shared.load()
-            uploadedRecords = try await v2Collector.collect(
-                quantityDescriptors: quantityDescriptors,
-                changedTypeIdentifiers: nil,
-                bootstrapCutoff: Date(),
-                pairing: pairing.material,
-                signingPrivateKey: pairing.signingPrivateKey
-            )
-
-            var immediatelyUploadedBatches = 0
-            var uploadScheduled = false
-            var immediateUploadError: Error?
-            if cloud.provider == .s3 {
-                let credentials = CloudStorageCredentials.load(for: .s3)
-                do {
-                    immediatelyUploadedBatches = try await v2Collector
-                        .uploadOneCloudPackImmediately(
-                            config: cloud,
-                            credentials: credentials,
-                            pairing: pairing.material,
-                            timeout: 30
-                        )
-                } catch {
-                    immediateUploadError = error
-                }
-
-                // If the immediate pack succeeded this schedules only a later
-                // partition, if any. If it failed, this hands the same stable
-                // pack back to iOS. A known S3 rate limit is left local until
-                // the already-scheduled BG refresh reaches its retry window.
-                let isRateLimited: Bool
-                if let cloudError = immediateUploadError as? CloudStorageError,
-                   case .rateLimited = cloudError {
-                    isRateLimited = true
-                } else {
-                    isRateLimited = false
-                }
-                if !isRateLimited {
-                    do {
-                        uploadScheduled = try await v2Collector.scheduleCloudUpload(
-                            config: cloud,
-                            credentials: credentials,
-                            pairing: pairing.material
-                        ) > 0
-                    } catch {
-                        if immediateUploadError == nil { immediateUploadError = error }
-                    }
-                }
-                lastEndpoint = cloud.provider.displayName
-            }
-            pendingBatches = try await v2Collector.pendingBatchCount()
-            await refreshCloudStatus()
-            if immediatelyUploadedBatches > 0 {
-                statusMessage = uploadScheduled
-                    ? "快捷指令已立即上传一个加密包；其余批次已交给 iOS 后台续传"
-                    : "快捷指令已立即上传加密包，等待 Receiver 确认"
-            } else if uploadScheduled {
-                statusMessage = "快捷指令即时上传未完成；密文已交给 iOS 后台续传"
-            } else if cloud.provider == .s3 {
-                statusMessage = pendingBatches > 0
-                    ? "快捷指令增量已加密保存在手机，等待后台重试"
-                    : "快捷指令增量检查完成；没有新的 S3 包需要提交"
-            } else {
-                statusMessage = "快捷指令已加密保存增量，等待后台刷新续传"
-            }
-            if let immediateUploadError, pendingBatches > 0 {
-                cloudStatusMessage = "即时上传未完成：\(immediateUploadError.localizedDescription)；密文未丢失"
-            }
-            let defaults = UserDefaults.standard
-            let diagnosticPrefix = Self.shortcutDiagnosticPrefix
-            defaults.set(Date(), forKey: diagnosticPrefix + "finishedAt")
-            defaults.set(uploadedRecords, forKey: diagnosticPrefix + "records")
-            defaults.set(pendingBatches, forKey: diagnosticPrefix + "pendingBatches")
-            defaults.set(
-                immediatelyUploadedBatches,
-                forKey: diagnosticPrefix + "immediatelyUploadedBatches"
-            )
-            defaults.set(uploadScheduled, forKey: diagnosticPrefix + "backgroundScheduled")
-            if let immediateUploadError {
-                let error = immediateUploadError as NSError
-                defaults.set(error.domain, forKey: diagnosticPrefix + "errorDomain")
-                defaults.set(error.code, forKey: diagnosticPrefix + "errorCode")
-                defaults.set(
-                    immediateUploadError.localizedDescription,
-                    forKey: diagnosticPrefix + "errorDescription"
-                )
-            } else {
-                defaults.removeObject(forKey: diagnosticPrefix + "errorDomain")
-                defaults.removeObject(forKey: diagnosticPrefix + "errorCode")
-                defaults.removeObject(forKey: diagnosticPrefix + "errorDescription")
-            }
-            if immediatelyUploadedBatches > 0 {
-                lastSyncDate = Date()
-                defaults.set(lastSyncDate, forKey: "personalReceiver.lastSyncDate")
-            }
-            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
-            return ShortcutIncrementalSyncResult(
-                records: uploadedRecords,
-                pendingBatches: pendingBatches,
-                immediatelyUploadedBatches: immediatelyUploadedBatches,
-                uploadScheduled: uploadScheduled,
-                wasAlreadyRunning: false
-            )
-        } catch {
-            pendingBatches = (try? await v2Collector.pendingBatchCount()) ?? pendingBatches
-            errorMessage = error.localizedDescription
-            statusMessage = "快捷指令同步未完成，已保留本地密文"
-            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
-            throw error
-        }
+        return ShortcutSyncRequestResult(
+            wasAlreadyPending: wasAlreadyPending,
+            syncWasRunning: isSyncing
+        )
     }
 
     /// HealthKit background delivery has a short execution budget. Read only
@@ -1060,32 +984,14 @@ final class PersonalHealthSyncService: ObservableObject {
         }
     }
 
-    /// Coalesce a Shortcuts trigger that arrives while another HealthKit pass
-    /// owns the anchored-query lock. Persisting the flag avoids losing the
-    /// user's charger/location trigger if iOS suspends the process meanwhile.
-    private func requestDeferredShortcutSync() {
-        UserDefaults.standard.set(true, forKey: Self.deferredShortcutSyncKey)
-        statusMessage = "已有同步任务运行；结束后将再次检查增量"
-        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
-    }
-
     private func finishSyncAndScheduleDeferredShortcut() {
         isSyncing = false
         guard UserDefaults.standard.bool(forKey: Self.deferredShortcutSyncKey) else {
             return
         }
-        UserDefaults.standard.removeObject(forKey: Self.deferredShortcutSyncKey)
-        Task { @MainActor [weak self] in
-            // Let the just-finished task release its actor turn before the
-            // coalesced pass takes the synchronization lock again.
-            await Task.yield()
-            guard let self else { return }
-            if self.isSyncing {
-                self.requestDeferredShortcutSync()
-                return
-            }
-            _ = try? await self.performShortcutIncrementalSync()
-        }
+        // Keep the durable request until a later background pass succeeds.
+        // Never recurse into synchronization from a finishing defer block.
+        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
     }
 
     private func performInitialDirectBootstrap(
