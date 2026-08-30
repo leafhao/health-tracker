@@ -6,7 +6,8 @@
 
 ### Changed
 
-- 暂无。
+- 长期安装方案统一为 Mac mini + Xcode Personal Team 自动续签；移除第三方重签实验路径，
+  补充多 Mac 共享同一签名证书与无线安装边界说明。
 
 ## [0.1.0-beta.1] - 2026-08-29
 
@@ -30,7 +31,8 @@
 ### Known limitations
 
 - iOS 最终决定 HealthKit 后台交付和 BGAppRefresh 的运行时间，不能保证固定时刻执行。
-- AltStore Classic 长期续签仍是实验性路径，需要继续验证 HealthKit 后台 entitlement。
+- Personal Team 描述文件只有 7 天，iPhone 仍需定期与续签 Mac 形成一次 USB 或同局域网
+  无线覆盖安装窗口。
 - 当前健康规则用于个人记录和趋势参考，不构成医疗诊断或训练处方。
 
 [Unreleased]: https://github.com/leafhao/health-tracker/compare/v0.1.0-beta.1...HEAD

@@ -4,7 +4,7 @@
 
 ## 目标
 
-- 免费运行，允许 AltStore 偶发续签失败后恢复。
+- 免费运行，使用 Mac mini + Xcode Personal Team 自动覆盖安装，并允许手机离线后重试。
 - 不把数据库账号保存在 iPhone。
 - 不把 MySQL/SQLite 端口暴露给手机或互联网。
 - 每条 HealthKit 样本保留 UUID、类型、数值、单位、起止时间、来源和设备，能够去重和补传。
@@ -69,7 +69,8 @@
 
 ## 可靠性原则
 
-- AltStore 过期不会导致 HealthKit 原始数据丢失，只会停止 App 后台同步。
+- Personal Team 描述文件到期不会导致 HealthKit 原始数据丢失；App 会停止运行，Mac mini
+  恢复覆盖安装后由本地队列和 HealthKit 回查补齐。
 - iPhone 端队列和 HealthKit 回查共同负责恢复。
 - 服务端所有写入幂等，重复上传不增加重复记录。
 - SQLite 每日快照备份；JSON 是分析产物，不是唯一数据源。

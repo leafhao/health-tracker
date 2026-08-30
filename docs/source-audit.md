@@ -53,6 +53,6 @@ df07606de30f90073c6676f926d8987a0d9a2489
 - UUID 幂等写入
 - 7 天回补
 - 局域网/Tailscale 地址回退
-- AltStore 刷新后的 HealthKit 权限验证
+- Xcode Personal Team 覆盖安装后的 HealthKit 权限验证
 
 后续再做：ECG、药物、视力、位置围栏、营养和完整历史回填 UI。

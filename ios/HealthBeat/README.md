@@ -66,9 +66,15 @@ iOS 不承诺固定调度时间。请在系统“后台 App 刷新”中启用�
 
 建议家庭和公司分别建立一条自动化。动作会立即返回“同步请求已提交”；App 持久化请求并向 iOS 申请后台刷新，若当前仍有执行时间也会尽力立即开始。若触发时已有同步任务运行，请求会被合并并留待后续消费。重复触发不会重复入库；如果 Apple Watch 数据在触发后才进入 iPhone HealthKit，HealthKit Observer 或下一次自动化仍会补上。
 
-## AltStore
+## 长期安装与续签
 
-AltStore Classic 安装会重新签名 IPA，可能影响 HealthKit/后台 entitlement。完整步骤和强制验证清单见仓库根目录 [AltStore 文档](../../docs/altstore-classic.md)。在 AltStore 真机验证成功前，Xcode 安装是基准路径。
+推荐让长期在线的 Mac mini 使用 Xcode Personal Team 自动签名并在同一局域网内无线覆盖
+安装。仓库脚本会在描述文件到期前重新构建，安装前验证 HealthKit 与 Background Delivery
+entitlement，并在手机暂时离线时保留产物重试。另一台开发 Mac 如需独立构建，应导入
+Mac mini 当前的同一 Apple Development 证书及私钥，而不是创建第二套签名身份。
+
+完整步骤见仓库根目录
+[Mac mini + Xcode 自动续签](../../docs/xcode-personal-team-autorenew.md)。
 
 ## 隐私
 

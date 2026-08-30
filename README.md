@@ -8,21 +8,16 @@ Health Tracker 是一个开源、自托管的个人健康数据系统。iPhone �
 
 ## 系统组成
 
-```text
-Apple Watch / iPhone HealthKit
-            │ 增量读取、持久化队列
-            ▼
-        iPhone Collector
-            │ HPKE 加密 + Ed25519 签名
-            ├──────── 局域网直传（首次回溯 / 应急） ────────┐
-            │                                                │
-            └── S3 / WebDAV 密文中继（后续增量） ───────────┤
-                                                             ▼
-                                                   Receiver + SQLite
-                                                             │
-                          ┌──────────────────────────────────┼──────────────┐
-                          ▼                                  ▼              ▼
-                    健康数据面板                       本机 Agent API    JSON 导出
+```mermaid
+flowchart TB
+    health["Apple Watch / iPhone<br/>HealthKit"]
+    collector["iPhone Collector<br/>增量读取 · 持久化队列"]
+    encryption["端到端保护<br/>HPKE 加密 · Ed25519 签名"]
+    transport["密文传输<br/>局域网直传：首次回溯 / 应急<br/>S3 / WebDAV：后续增量"]
+    receiver["Receiver + SQLite<br/>验签 · 解密 · 去重 · 规整 · 物化快照"]
+    outputs["本地输出<br/>健康数据面板 · 本机 Agent API · JSON 导出"]
+
+    health --> collector --> encryption --> transport --> receiver --> outputs
 ```
 
 - 云存储只能看到加密包、随机设备标识和传输状态，不能读取健康明文。
@@ -120,19 +115,34 @@ iOS 的后台执行时间由系统决定。App 会在冷启动入口注册 Healt
 - 面板：在 Receiver 本机访问 `/dashboard`；不要把 8787 端口映射到公网。
 - Agent：同机程序访问 `http://127.0.0.1:8787/api/v1/agent/catalog` 和相关只读接口，见 [Agent API](docs/agent-api.md)。
 
-## 免费签名续期
+## Mac mini + Xcode 免费续签（推荐）
 
-HealthKit App 推荐使用长期在线的 Mac mini 通过 Xcode Automatic Signing 自动重签并
-覆盖安装。仓库提供 launchd 安装脚本、72 小时安全窗口、离线重试、entitlement 验证和
-失败通知，详见 [Mac mini + Xcode 自动续签](docs/xcode-personal-team-autorenew.md)。
+本项目只推荐 Xcode Personal Team 覆盖安装，不依赖第三方重签工具。长期在线的 Mac mini
+作为续签主机：Xcode Automatic Signing 负责签名，launchd 每 30 分钟检查一次；描述文件
+剩余不足 72 小时或 iOS 源码发生变化时重新构建。手机与 Mac mini 同一局域网时无线覆盖
+安装，暂时离线则保留已签名产物并在后续检查中重试。覆盖安装不会主动卸载 App，也不会
+清空 App 沙盒、Keychain、HealthKit 授权或快捷指令绑定。
 
-## AltStore Classic（实验性）
+一次性准备包括：在 Mac mini 安装并登录 Xcode、用 USB 与 iPhone 配对、开启 Finder 的
+“连接 Wi-Fi 时显示此 iPhone”、保持开发者模式开启，然后安装仓库提供的续签任务：
 
-Xcode 免费签名通常只有 7 天。完成 Xcode 真机功能验证后，可以测试 AltStore Classic 自动续签。AltServer 应安装在长期在线的 Mac mini，并启用 Finder 的 Wi‑Fi 同步。
+```zsh
+IOS_DEVICE_ID='你的 iPhone UDID' \
+DEVELOPMENT_TEAM='你的 Team ID' \
+BUNDLE_IDENTIFIER='你的唯一 Bundle ID' \
+./scripts/configure_ios_autorenew_macos.zsh install
+```
 
-重要：AltStore 会重新签名 IPA；HealthKit 与后台交付 entitlement 是否被当前版本完整保留必须在你的真机重新验证。不要在确认 HealthKit 授权弹窗、后台刷新入口和实际增量同步正常之前删除 Xcode 版或依赖 AltStore 续签。
+另一台开发 Mac 可以安全导入 Mac mini 当前 Apple Development 证书及私钥，从而使用同一
+签名身份构建和有线安装。证书只能通过带强密码的临时 `.p12` 点对点转移，导入后应立即删除
+`.p12` 和密码；不要通过 Git、GitHub、网盘或聊天工具保存证书。GitHub 只用于同步源码。
+正常的 7 天描述文件续期不会更换证书，只有证书被撤销或 Xcode 创建了新证书时才需要重新
+同步证书。
 
-完整步骤、IPA 构建方法、7 天限制与验证清单见 [AltStore Classic 安装](docs/altstore-classic.md)。
+无线安装依赖 Bonjour/CoreDevice 和真实的同一局域网；Tailscale 可以远程管理 Mac mini、
+同步代码和查看续签状态，但不能替代 iPhone 与 Mac mini 的本地无线安装通道。完整安装、
+多 Mac 证书同步、安全边界和故障恢复见
+[Mac mini + Xcode 自动续签](docs/xcode-personal-team-autorenew.md)。
 
 ## 数据与安全边界
 
