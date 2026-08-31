@@ -6,6 +6,7 @@ import os
 import hmac
 import statistics
 from datetime import date, datetime, timedelta
+from email.header import decode_header, make_header
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -39,6 +40,15 @@ def _is_loopback(value: str | None) -> bool:
         return False
 
 
+def _decode_identity_header(value: str) -> str:
+    """Decode the RFC 2047 form Tailscale uses for non-ASCII names."""
+    try:
+        decoded = str(make_header(decode_header(value))).strip()
+    except (LookupError, UnicodeError):
+        return value
+    return decoded or value
+
+
 def _admin_identity(request: Request) -> dict[str, str] | None:
     """Trust the local OS user or the identity asserted by Tailscale Serve.
 
@@ -58,7 +68,9 @@ def _admin_identity(request: Request) -> dict[str, str] | None:
     ):
         return {
             "mode": "tailscale",
-            "display_name": request.headers.get("tailscale-user-name", supplied_login),
+            "display_name": _decode_identity_header(
+                request.headers.get("tailscale-user-name", supplied_login)
+            ),
         }
     return None
 

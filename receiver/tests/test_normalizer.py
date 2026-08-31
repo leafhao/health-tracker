@@ -506,11 +506,13 @@ class NormalizerTests(unittest.TestCase):
             client=("127.0.0.1", 50001),
             headers={
                 "Tailscale-User-Login": "owner@example.com",
-                "Tailscale-User-Name": "Owner",
+                "Tailscale-User-Name": "=?utf-8?q?=E4=B9=8B=E9=97=B4=E8=93=AC=E8=92=BF?=",
             },
         )
         self.assertEqual(tailscale.get("/dashboard").status_code, 200)
-        self.assertEqual(tailscale.get("/api/v2/admin/status").json()["identity"]["mode"], "tailscale")
+        tailscale_status = tailscale.get("/api/v2/admin/status").json()["identity"]
+        self.assertEqual(tailscale_status["mode"], "tailscale")
+        self.assertEqual(tailscale_status["display_name"], "之间蓬蒿")
 
         wrong_identity = TestClient(
             self.app,
