@@ -196,12 +196,22 @@ def _mean(values: Iterable[float]) -> float | None:
     return statistics.fmean(finite) if finite else None
 
 
-def _latest(database: Database, type_id: str, before: datetime) -> dict[str, Any] | None:
+def _latest(
+    database: Database,
+    type_id: str,
+    before: datetime,
+    max_age: timedelta | None = None,
+) -> dict[str, Any] | None:
+    clauses = ["type = ?", "start_date < ?"]
+    parameters: list[Any] = [type_id, _timestamp(before)]
+    if max_age is not None:
+        clauses.append("start_date >= ?")
+        parameters.append(_timestamp(before - max_age))
     rows = database.fetch_all(
-        """SELECT * FROM quantity_samples
-           WHERE type = ? AND start_date < ?
-           ORDER BY start_date DESC LIMIT 1""",
-        (type_id, _timestamp(before)),
+        f"""SELECT * FROM quantity_samples
+            WHERE {' AND '.join(clauses)}
+            ORDER BY start_date DESC LIMIT 1""",
+        parameters,
     )
     return rows[0] if rows else None
 
@@ -784,11 +794,12 @@ def _daily_summary(
 
     vo2 = _latest(database, VO2_MAX, day_end)
     recovery = _latest(database, HEART_RATE_RECOVERY, day_end)
-    body_mass = _latest(database, BODY_MASS, day_end)
-    body_fat = _latest(database, BODY_FAT_PERCENTAGE, day_end)
-    body_mass_index = _latest(database, BODY_MASS_INDEX, day_end)
+    body_measurement_max_age = timedelta(days=30)
+    body_mass = _latest(database, BODY_MASS, day_end, body_measurement_max_age)
+    body_fat = _latest(database, BODY_FAT_PERCENTAGE, day_end, body_measurement_max_age)
+    body_mass_index = _latest(database, BODY_MASS_INDEX, day_end, body_measurement_max_age)
     height = _latest(database, HEIGHT, day_end)
-    lean_body_mass = _latest(database, LEAN_BODY_MASS, day_end)
+    lean_body_mass = _latest(database, LEAN_BODY_MASS, day_end, body_measurement_max_age)
     oxygen = average(OXYGEN_SATURATION)
     if oxygen is not None and oxygen <= 1.5:
         oxygen *= 100

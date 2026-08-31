@@ -413,6 +413,53 @@ class NormalizerTests(unittest.TestCase):
             "available",
         )
 
+    def test_body_composition_expires_after_thirty_days_but_height_remains_reusable(self) -> None:
+        self.ingest_quantities(
+            [
+                {
+                    "uuid": "stale-body-weight",
+                    "type": "HKQuantityTypeIdentifierBodyMass",
+                    "value": 70,
+                    "unit": "kg",
+                    "start_date": "2022-08-01T02:00:00Z",
+                    "end_date": "2022-08-01T02:00:01Z",
+                    "source_name": "Huawei Health",
+                },
+                {
+                    "uuid": "persistent-height",
+                    "type": "HKQuantityTypeIdentifierHeight",
+                    "value": 1.75,
+                    "unit": "m",
+                    "start_date": "2022-08-01T02:00:00Z",
+                    "end_date": "2022-08-01T02:00:01Z",
+                    "source_name": "Health",
+                },
+            ]
+        )
+
+        stale = normalize_day(self.database, date(2026, 8, 1))["daily"]
+        self.assertIsNone(stale["body_mass_kg"])
+        self.assertIsNone(stale["body_mass_at"])
+        self.assertIsNone(stale["body_mass_index"])
+
+        self.ingest_quantities(
+            [
+                {
+                    "uuid": "fresh-body-weight",
+                    "type": "HKQuantityTypeIdentifierBodyMass",
+                    "value": 68,
+                    "unit": "kg",
+                    "start_date": "2026-07-15T02:00:00Z",
+                    "end_date": "2026-07-15T02:00:01Z",
+                    "source_name": "Huawei Health",
+                }
+            ]
+        )
+        fresh = normalize_day(self.database, date(2026, 8, 1))["daily"]
+        self.assertEqual(fresh["body_mass_kg"], 68)
+        self.assertAlmostEqual(fresh["body_mass_index"], 68 / (1.75 ** 2))
+        self.assertEqual(fresh["body_mass_index_source"], "calculated")
+
     def test_export_v2_uses_separate_normalized_layer_without_sleep_duplication(self) -> None:
         self.ingest_sleep(
             [
