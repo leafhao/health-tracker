@@ -487,7 +487,9 @@ class NormalizerTests(unittest.TestCase):
         self.assertIn("健康数据面板", local_dashboard.text)
         self.assertIn("'elliptical':'椭圆机训练'", local_dashboard.text)
         self.assertIn("workoutTypeLabel(w.activity_type)", local_dashboard.text)
-        self.assertIn("身体成分趋势", local_dashboard.text)
+        self.assertIn("近 30 天有效 · 低频长期指标", local_dashboard.text)
+        self.assertIn('id="bodyPanel"', local_dashboard.text)
+        self.assertNotIn("metric('体重'", local_dashboard.text)
         dashboard_status = self.client.get("/api/v1/dashboard/status")
         self.assertEqual(dashboard_status.status_code, 200)
         self.assertEqual(
