@@ -47,7 +47,7 @@ curl http://127.0.0.1:8787/api/v1/agent/context/2026-08-27
 - `training_load_context`：近 7 天与此前 4 周的训练负荷背景；
 - `trends`：7、28、90 天关键指标摘要；
 - `deterministic_signals`：只描述事实变化，不生成医学诊断或训练处方；
-- `data_quality`：设备能力、权限状态、样本覆盖、来源规则及缺失原因。
+- `data_quality`：活动、睡眠、身体成分、训练的分区状态，以及设备能力、权限状态、逐指标样本覆盖、来源规则及缺失原因。
 
 查询其他时区时可传 `timezone_name`。系统当前默认使用 `Asia/Shanghai`。
 

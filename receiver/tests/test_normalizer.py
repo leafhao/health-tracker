@@ -403,6 +403,15 @@ class NormalizerTests(unittest.TestCase):
         context = self.client.get("/api/v1/agent/context/2026-08-27").json()
         self.assertEqual(context["body"]["body_mass_kg"], 70)
         self.assertEqual(context["body"]["body_fat_percent"], 20)
+        self.assertEqual(context["data_quality"]["section_status"]["body"], "available")
+        self.assertEqual(
+            context["data_quality"]["metric_status"]["body_mass_index"]["status"],
+            "available",
+        )
+        self.assertEqual(
+            context["data_quality"]["metric_status"]["lean_body_mass_kg"]["status"],
+            "available",
+        )
 
     def test_export_v2_uses_separate_normalized_layer_without_sleep_duplication(self) -> None:
         self.ingest_sleep(

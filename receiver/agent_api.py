@@ -339,6 +339,8 @@ def _metric_status(
         "heart_rate_recovery_bpm": ("heart_rate_recovery", daily),
         "body_mass_kg": ("body_mass", daily),
         "body_fat_percent": ("body_fat_percentage", daily),
+        "body_mass_index": ("body_mass_index", daily),
+        "lean_body_mass_kg": ("lean_body_mass", daily),
         "sleeping_wrist_temperature_c": ("sleeping_wrist_temperature", sleep),
     }
     output: dict[str, dict[str, Any]] = {}
@@ -414,6 +416,13 @@ def build_agent_context(
     today = datetime.now(timezone).date()
     projection_status = jobs[0]["status"] if jobs else ("completed" if run else "unavailable")
     availability = _data_availability(database)
+    body_available = bool(daily and any(
+        daily.get(key) is not None
+        for key in (
+            "body_mass_kg", "body_fat_percent", "body_mass_index",
+            "lean_body_mass_kg",
+        )
+    ))
     return {
         "schema_version": AGENT_SCHEMA_VERSION,
         "date": target_date.isoformat(),
@@ -468,6 +477,7 @@ def build_agent_context(
             "section_status": {
                 "activity": "available" if daily else ("pending" if projection_status in {"pending", "running"} else "missing"),
                 "sleep": "available" if sleep else ("pending" if projection_status in {"pending", "running"} else "missing"),
+                "body": "available" if body_available else ("pending" if projection_status in {"pending", "running"} else "missing"),
                 "training": "available" if training else ("pending" if projection_status in {"pending", "running"} else "missing"),
                 "workouts": "available" if workouts else "none_recorded",
             },
