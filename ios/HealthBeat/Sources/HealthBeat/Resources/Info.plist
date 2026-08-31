@@ -32,8 +32,6 @@
 	<true/>
 	<key>NSHealthShareUsageDescription</key>
 	<string>用于读取睡眠、锻炼、心率、活动和跑步指标，并同步到你自己的 Mac mini 做每日健康分析。</string>
-	<key>NSHealthUpdateUsageDescription</key>
-	<string>仅在你明确选择补录文件并确认后，将历史体重和体脂率写入 Apple 健康；日常同步仍为只读。</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于在同一局域网自动发现并安全配对你自己的健康数据 Receiver。</string>
 	<key>NSBonjourServices</key>

@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var selectedTab = 0
@@ -314,12 +313,6 @@ private struct HealthSyncSettingsView: View {
     @State private var showManualPairing = false
     @State private var showReceiverSearch = false
     @State private var showInitialSyncSetup = false
-    @State private var showBodyImportPicker = false
-    @State private var showBodyImportConfirmation = false
-    @State private var pendingBodyImport: BodyCompositionImportDocument?
-    @State private var isImportingBodyComposition = false
-    @State private var bodyImportMessage: String?
-    @State private var bodyImportFailed = false
 
     private var needsInitialSync: Bool {
         !sync.isInitialDirectBootstrapComplete || sync.needsHistoricalBackfill
@@ -329,36 +322,9 @@ private struct HealthSyncSettingsView: View {
         NavigationStack {
             Form {
                 Section("健康权限") {
-                    Text("日常同步只读取睡眠、锻炼、心率、活动、身体成分、VO₂ Max 和跑步专项指标，不会主动修改健康数据。历史补录仅在你选择文件并确认后写入体重和体脂率。")
+                    Text("只读取睡眠、锻炼、心率、活动、身体成分、VO₂ Max 和跑步专项指标，不会写入健康数据。App 更新后请点一次下方按钮，以授权新增的数据类型。")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("申请或更新读取权限") { Task { await sync.requestHealthAuthorization() } }
-                }
-
-                Section("身体成分历史补录") {
-                    Text("从 JSON 文件补录体重和体脂率。写入前会显示日期范围和记录数，并单独申请 Apple 健康写入权限；重复选择同一文件不会重复写入。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Button {
-                        bodyImportMessage = nil
-                        showBodyImportPicker = true
-                    } label: {
-                        HStack {
-                            Label("选择补录文件", systemImage: "doc.badge.plus")
-                            Spacer()
-                            if isImportingBodyComposition { ProgressView() }
-                        }
-                    }
-                    .disabled(isImportingBodyComposition)
-                    if let bodyImportMessage {
-                        Label(
-                            bodyImportMessage,
-                            systemImage: bodyImportFailed
-                                ? "exclamationmark.triangle.fill"
-                                : "checkmark.circle.fill"
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(bodyImportFailed ? .red : .green)
-                    }
                 }
 
                 Section("数据同步") {
@@ -502,28 +468,6 @@ private struct HealthSyncSettingsView: View {
                 }
             }
             .navigationTitle("设置")
-            .fileImporter(
-                isPresented: $showBodyImportPicker,
-                allowedContentTypes: [.json]
-            ) { result in
-                prepareBodyCompositionImport(result)
-            }
-            .confirmationDialog(
-                "写入 Apple 健康？",
-                isPresented: $showBodyImportConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("确认写入体重和体脂率") {
-                    performBodyCompositionImport()
-                }
-                Button("取消", role: .cancel) {
-                    pendingBodyImport = nil
-                }
-            } message: {
-                if let document = pendingBodyImport {
-                    Text("\(document.summary)；来源：\(document.source)。估算数据会标记为用户补录。")
-                }
-            }
             .sheet(isPresented: $showInitialSyncSetup) {
                 InitialSyncSetupView(sync: sync)
             }
@@ -549,46 +493,6 @@ private struct HealthSyncSettingsView: View {
                 }
             }
             .onDisappear { discovery.stop() }
-        }
-    }
-
-    private func prepareBodyCompositionImport(_ result: Result<URL, Error>) {
-        do {
-            let url = try result.get()
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer {
-                if accessed { url.stopAccessingSecurityScopedResource() }
-            }
-            let data = try Data(contentsOf: url)
-            pendingBodyImport = try HealthKitService.shared.decodeBodyCompositionImport(data)
-            bodyImportFailed = false
-            showBodyImportConfirmation = true
-        } catch {
-            pendingBodyImport = nil
-            bodyImportFailed = true
-            bodyImportMessage = error.localizedDescription
-        }
-    }
-
-    private func performBodyCompositionImport() {
-        guard let document = pendingBodyImport else { return }
-        isImportingBodyComposition = true
-        bodyImportMessage = nil
-        Task {
-            do {
-                let result = try await HealthKitService.shared.importBodyComposition(document)
-                if result.savedSamples == 0 {
-                    bodyImportMessage = "这份文件中的数据已经写入过，没有新增记录。"
-                } else {
-                    bodyImportMessage = "已写入 \(result.documentMeasurements) 天、\(result.savedSamples) 条身体成分记录。"
-                }
-                bodyImportFailed = false
-            } catch {
-                bodyImportFailed = true
-                bodyImportMessage = error.localizedDescription
-            }
-            pendingBodyImport = nil
-            isImportingBodyComposition = false
         }
     }
 }
