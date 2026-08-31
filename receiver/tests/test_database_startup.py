@@ -36,7 +36,7 @@ class ConcurrentDatabaseStartupTests(unittest.TestCase):
                 count = connection.execute(
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).fetchone()[0]
-            self.assertEqual(count, 11)
+            self.assertEqual(count, 13)
 
     def test_multiple_service_processes_create_one_receiver_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

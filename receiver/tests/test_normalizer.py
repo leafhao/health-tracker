@@ -360,6 +360,50 @@ class NormalizerTests(unittest.TestCase):
         self.assertEqual(daily["vo2_max"], 40.03)
         self.assertEqual(daily["vo2_max_at"], "2026-08-26T12:17:03.000Z")
 
+    def test_body_composition_uses_healthkit_values_and_calculates_missing_fields(self) -> None:
+        self.ingest_quantities(
+            [
+                {
+                    "uuid": "body-weight",
+                    "type": "HKQuantityTypeIdentifierBodyMass",
+                    "value": 70,
+                    "unit": "kg",
+                    "start_date": "2026-08-27T02:00:00Z",
+                    "end_date": "2026-08-27T02:00:01Z",
+                    "source_name": "Huawei Health",
+                },
+                {
+                    "uuid": "body-fat",
+                    "type": "HKQuantityTypeIdentifierBodyFatPercentage",
+                    "value": 0.2,
+                    "unit": "%",
+                    "start_date": "2026-08-27T02:00:00Z",
+                    "end_date": "2026-08-27T02:00:01Z",
+                    "source_name": "Huawei Health",
+                },
+                {
+                    "uuid": "body-height",
+                    "type": "HKQuantityTypeIdentifierHeight",
+                    "value": 1.75,
+                    "unit": "m",
+                    "start_date": "2026-01-01T02:00:00Z",
+                    "end_date": "2026-01-01T02:00:01Z",
+                    "source_name": "Health",
+                },
+            ]
+        )
+        daily = normalize_day(self.database, date(2026, 8, 27))["daily"]
+        self.assertEqual(daily["body_mass_kg"], 70)
+        self.assertEqual(daily["body_fat_percent"], 20)
+        self.assertAlmostEqual(daily["body_mass_index"], 70 / (1.75 ** 2))
+        self.assertEqual(daily["body_mass_index_source"], "calculated")
+        self.assertAlmostEqual(daily["lean_body_mass_kg"], 56)
+        self.assertEqual(daily["lean_body_mass_source"], "calculated")
+
+        context = self.client.get("/api/v1/agent/context/2026-08-27").json()
+        self.assertEqual(context["body"]["body_mass_kg"], 70)
+        self.assertEqual(context["body"]["body_fat_percent"], 20)
+
     def test_export_v2_uses_separate_normalized_layer_without_sleep_duplication(self) -> None:
         self.ingest_sleep(
             [
@@ -387,6 +431,7 @@ class NormalizerTests(unittest.TestCase):
         self.assertIn("健康数据面板", local_dashboard.text)
         self.assertIn("'elliptical':'椭圆机训练'", local_dashboard.text)
         self.assertIn("workoutTypeLabel(w.activity_type)", local_dashboard.text)
+        self.assertIn("身体成分趋势", local_dashboard.text)
         dashboard_status = self.client.get("/api/v1/dashboard/status")
         self.assertEqual(dashboard_status.status_code, 200)
         self.assertEqual(

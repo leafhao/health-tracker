@@ -29,6 +29,10 @@ OXYGEN_SATURATION = "HKQuantityTypeIdentifierOxygenSaturation"
 VO2_MAX = "HKQuantityTypeIdentifierVO2Max"
 HEART_RATE_RECOVERY = "HKQuantityTypeIdentifierHeartRateRecoveryOneMinute"
 BODY_MASS = "HKQuantityTypeIdentifierBodyMass"
+BODY_FAT_PERCENTAGE = "HKQuantityTypeIdentifierBodyFatPercentage"
+BODY_MASS_INDEX = "HKQuantityTypeIdentifierBodyMassIndex"
+HEIGHT = "HKQuantityTypeIdentifierHeight"
+LEAN_BODY_MASS = "HKQuantityTypeIdentifierLeanBodyMass"
 SLEEPING_WRIST_TEMPERATURE = "HKQuantityTypeIdentifierAppleSleepingWristTemperature"
 RUNNING_POWER = "HKQuantityTypeIdentifierRunningPower"
 RUNNING_SPEED = "HKQuantityTypeIdentifierRunningSpeed"
@@ -781,9 +785,41 @@ def _daily_summary(
     vo2 = _latest(database, VO2_MAX, day_end)
     recovery = _latest(database, HEART_RATE_RECOVERY, day_end)
     body_mass = _latest(database, BODY_MASS, day_end)
+    body_fat = _latest(database, BODY_FAT_PERCENTAGE, day_end)
+    body_mass_index = _latest(database, BODY_MASS_INDEX, day_end)
+    height = _latest(database, HEIGHT, day_end)
+    lean_body_mass = _latest(database, LEAN_BODY_MASS, day_end)
     oxygen = average(OXYGEN_SATURATION)
     if oxygen is not None and oxygen <= 1.5:
         oxygen *= 100
+
+    body_mass_kg = float(body_mass["value"]) if body_mass else None
+    body_fat_percent = float(body_fat["value"]) if body_fat else None
+    if body_fat_percent is not None and body_fat_percent <= 1.5:
+        body_fat_percent *= 100
+    height_m = float(height["value"]) if height else None
+
+    if body_mass_index:
+        bmi = float(body_mass_index["value"])
+        bmi_at = body_mass_index["start_date"]
+        bmi_source = "healthkit"
+    elif body_mass_kg is not None and height_m is not None and height_m > 0:
+        bmi = body_mass_kg / (height_m * height_m)
+        bmi_at = max(body_mass["start_date"], height["start_date"])
+        bmi_source = "calculated"
+    else:
+        bmi = bmi_at = bmi_source = None
+
+    if lean_body_mass:
+        lean_mass_kg = float(lean_body_mass["value"])
+        lean_mass_at = lean_body_mass["start_date"]
+        lean_mass_source = "healthkit"
+    elif body_mass_kg is not None and body_fat_percent is not None:
+        lean_mass_kg = body_mass_kg * (1 - body_fat_percent / 100)
+        lean_mass_at = max(body_mass["start_date"], body_fat["start_date"])
+        lean_mass_source = "calculated"
+    else:
+        lean_mass_kg = lean_mass_at = lean_mass_source = None
 
     return {
         "timezone": timezone_name,
@@ -805,8 +841,16 @@ def _daily_summary(
         "vo2_max_at": vo2["start_date"] if vo2 else None,
         "heart_rate_recovery_bpm": float(recovery["value"]) if recovery else None,
         "heart_rate_recovery_at": recovery["start_date"] if recovery else None,
-        "body_mass_kg": float(body_mass["value"]) if body_mass else None,
+        "body_mass_kg": body_mass_kg,
         "body_mass_at": body_mass["start_date"] if body_mass else None,
+        "body_fat_percent": body_fat_percent,
+        "body_fat_at": body_fat["start_date"] if body_fat else None,
+        "body_mass_index": bmi,
+        "body_mass_index_at": bmi_at,
+        "body_mass_index_source": bmi_source,
+        "lean_body_mass_kg": lean_mass_kg,
+        "lean_body_mass_at": lean_mass_at,
+        "lean_body_mass_source": lean_mass_source,
         "normalized_at": normalized_at,
     }
 

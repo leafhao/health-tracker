@@ -408,6 +408,9 @@ final class PersonalHealthSyncService: ObservableObject {
     private static let recentDomainRepairVersionKey =
         "personalReceiver.v2.recentDomainRepairVersion"
     private static let recentDomainRepairVersion = "30-days-semantic-sleep-workout-activity-v2"
+    private static let bodyCompositionRepairVersionKey =
+        "personalReceiver.v2.bodyCompositionRepairVersion"
+    private static let bodyCompositionRepairVersion = "all-body-composition-v1"
     private static let deferredShortcutSyncKey =
         "personalReceiver.v2.deferredShortcutSync"
     private static let deferredShortcutSyncRequestedAtKey =
@@ -432,6 +435,10 @@ final class PersonalHealthSyncService: ObservableObject {
         HKQuantityTypeIdentifier.appleExerciseTime.rawValue,
         HKQuantityTypeIdentifier.appleStandTime.rawValue,
         HKQuantityTypeIdentifier.bodyMass.rawValue,
+        HKQuantityTypeIdentifier.bodyFatPercentage.rawValue,
+        HKQuantityTypeIdentifier.bodyMassIndex.rawValue,
+        HKQuantityTypeIdentifier.height.rawValue,
+        HKQuantityTypeIdentifier.leanBodyMass.rawValue,
         HKQuantityTypeIdentifier.heartRate.rawValue,
         HKQuantityTypeIdentifier.restingHeartRate.rawValue,
         HKQuantityTypeIdentifier.walkingHeartRateAverage.rawValue,
@@ -707,7 +714,7 @@ final class PersonalHealthSyncService: ObservableObject {
             guard healthKit.isAvailable else { throw HKError(.errorHealthDataUnavailable) }
             try await healthKit.requestPermissions(for: readTypes)
             UserDefaults.standard.set(true, forKey: "personalReceiver.healthPermissionRequested")
-            registerBackgroundObserversAtLaunch()
+            restartBackgroundObservers()
             statusMessage = "健康权限已请求"
         } catch {
             errorMessage = error.localizedDescription
@@ -885,6 +892,9 @@ final class PersonalHealthSyncService: ObservableObject {
             let credentials = try await HealthV2PairingService.shared.load()
             if allowHistoricalBackfill, changedTypeIdentifiers == nil {
                 try await repairRecentDomainHistoryIfNeeded(credentials: credentials)
+                if isInitialDirectBootstrapComplete {
+                    try await repairBodyCompositionHistoryIfNeeded(credentials: credentials)
+                }
             }
             if !UserDefaults.standard.bool(forKey: Self.initialDirectBootstrapCompletedKey) {
                 try await performInitialDirectBootstrap(
@@ -1218,6 +1228,44 @@ final class PersonalHealthSyncService: ObservableObject {
         statusMessage = "近 30 天睡眠、锻炼与活动数据已修复"
     }
 
+    /// Body composition is sparse even across many years, so upgrades can
+    /// safely backfill all available samples without repeating the much larger
+    /// activity and heart-rate history. This also captures measurements that
+    /// Huawei Health wrote into HealthKit before these types joined V2 sync.
+    private func repairBodyCompositionHistoryIfNeeded(
+        credentials: (material: HealthPairingMaterial, signingPrivateKey: Data)
+    ) async throws {
+        guard UserDefaults.standard.string(forKey: Self.bodyCompositionRepairVersionKey)
+                != Self.bodyCompositionRepairVersion else { return }
+        let identifiers: Set<String> = [
+            HKQuantityTypeIdentifier.bodyMass.rawValue,
+            HKQuantityTypeIdentifier.bodyFatPercentage.rawValue,
+            HKQuantityTypeIdentifier.bodyMassIndex.rawValue,
+            HKQuantityTypeIdentifier.height.rawValue,
+            HKQuantityTypeIdentifier.leanBodyMass.rawValue,
+        ]
+        let descriptors = quantityDescriptors.filter { identifiers.contains($0.id) }
+        guard !descriptors.isEmpty else { return }
+        statusMessage = "正在补充历史体重与身体成分…"
+        uploadedRecords += try await v2Collector.collectHistory(
+            quantityDescriptors: descriptors,
+            from: nil,
+            until: Date(),
+            relayGroup: "repair/body-composition-v1",
+            pairing: credentials.material,
+            signingPrivateKey: credentials.signingPrivateKey
+        ) { [weak self] label, count in
+            await MainActor.run {
+                self?.statusMessage = "身体成分补充：\(label) · \(count) 条"
+            }
+        }
+        UserDefaults.standard.set(
+            Self.bodyCompositionRepairVersion,
+            forKey: Self.bodyCompositionRepairVersionKey
+        )
+        statusMessage = "历史体重与身体成分已整理，等待加密上传"
+    }
+
     private func initialDirectProgressHandler()
         -> @Sendable (Int, Int, Int, Int) async -> Void {
         let baselineCompleted = initialDirectCompletedBatches
@@ -1428,6 +1476,17 @@ final class PersonalHealthSyncService: ObservableObject {
         guard UserDefaults.standard.bool(
             forKey: "personalReceiver.healthPermissionRequested"
         ) else { return }
+        startObservers()
+    }
+
+    private func restartBackgroundObservers() {
+        observerDebounceTask?.cancel()
+        observerDebounceTask = nil
+        for query in observerQueries {
+            healthKit.store.stop(query)
+        }
+        observerQueries.removeAll()
+        observersStarted = false
         startObservers()
     }
 

@@ -322,7 +322,7 @@ private struct HealthSyncSettingsView: View {
         NavigationStack {
             Form {
                 Section("健康权限") {
-                    Text("只读取睡眠、锻炼、心率、活动、VO₂ Max 和跑步专项指标，不会写入健康数据。")
+                    Text("只读取睡眠、锻炼、心率、活动、身体成分、VO₂ Max 和跑步专项指标，不会写入健康数据。App 更新后请点一次下方按钮，以授权新增的数据类型。")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("申请或更新读取权限") { Task { await sync.requestHealthAuthorization() } }
                 }

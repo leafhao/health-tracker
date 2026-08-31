@@ -55,6 +55,9 @@ METRIC_CATALOG: dict[str, dict[str, Any]] = {
     "vo2_max": _metric("cardio_recovery", "mL/kg/min", "HealthKit VO2Max", "取截止分析日最近一次测量，并同时返回 vo2_max_at", "有氧能力趋势", "可能不是分析日当天测量"),
     "heart_rate_recovery_bpm": _metric("cardio_recovery", "bpm", "HealthKit HeartRateRecoveryOneMinute", "取截止分析日最近一次测量，并同时返回 heart_rate_recovery_at", "运动后一分钟恢复参考", "可能不是分析日当天测量"),
     "body_mass_kg": _metric("body", "kg", "HealthKit BodyMass", "取截止分析日最近一次测量，并同时返回 body_mass_at", "体重趋势背景", "可能不是分析日当天测量"),
+    "body_fat_percent": _metric("body", "%", "HealthKit BodyFatPercentage", "取截止分析日最近一次测量，统一为百分数并返回 body_fat_at", "身体成分趋势", "体脂秤结果属于消费级估算，适合纵向比较"),
+    "body_mass_index": _metric("body", "kg/m²", "优先 HealthKit BodyMassIndex，否则 BodyMass 与 Height", "直接读取或按体重÷身高²计算；读取 body_mass_index_source 区分", "体重相对身高的筛查指标", "不能单独反映肌肉与脂肪分布"),
+    "lean_body_mass_kg": _metric("body", "kg", "优先 HealthKit LeanBodyMass，否则 BodyMass 与 BodyFatPercentage", "直接读取或按体重×(1-体脂率)计算；读取 lean_body_mass_source 区分", "非脂肪身体质量趋势", "计算精度受体脂秤估算误差影响"),
     "main_sleep_start": _metric("sleep", None, "HealthKit SleepAnalysis", "分析窗口内最长合并睡眠时段的开始", "入睡时间与作息规律"),
     "main_sleep_end": _metric("sleep", None, "HealthKit SleepAnalysis", "分析窗口内最长合并睡眠时段的结束", "起床时间与作息规律"),
     "total_asleep_minutes": _metric("sleep", "min", "HealthKit SleepAnalysis", "睡眠窗口内去重后的全部睡眠", "主睡眠与午睡总量"),
@@ -128,6 +131,9 @@ SERIES_METRICS.update({
     "vo2_max": ("normalized_daily_summaries", "vo2_max", "vo2_max_at"),
     "heart_rate_recovery_bpm": ("normalized_daily_summaries", "heart_rate_recovery_bpm", "heart_rate_recovery_at"),
     "body_mass_kg": ("normalized_daily_summaries", "body_mass_kg", "body_mass_at"),
+    "body_fat_percent": ("normalized_daily_summaries", "body_fat_percent", "body_fat_at"),
+    "body_mass_index": ("normalized_daily_summaries", "body_mass_index", "body_mass_index_at"),
+    "lean_body_mass_kg": ("normalized_daily_summaries", "lean_body_mass_kg", "lean_body_mass_at"),
 })
 SERIES_METRICS.update({
     key: ("normalized_sleep_summaries", key, None)
@@ -163,7 +169,8 @@ TREND_METRICS = (
     "resting_heart_rate_bpm", "hrv_sdnn_ms", "sleeping_heart_rate_avg_bpm",
     "sleeping_respiratory_rate", "sleeping_oxygen_avg_percent",
     "steps", "active_energy_kcal", "workout_minutes", "load_score",
-    "high_intensity_minutes", "vo2_max",
+    "high_intensity_minutes", "vo2_max", "body_mass_kg", "body_fat_percent",
+    "body_mass_index", "lean_body_mass_kg",
 )
 
 
@@ -330,6 +337,8 @@ def _metric_status(
         "respiratory_rate": ("respiratory_rate", daily),
         "vo2_max": ("vo2_max", daily),
         "heart_rate_recovery_bpm": ("heart_rate_recovery", daily),
+        "body_mass_kg": ("body_mass", daily),
+        "body_fat_percent": ("body_fat_percentage", daily),
         "sleeping_wrist_temperature_c": ("sleeping_wrist_temperature", sleep),
     }
     output: dict[str, dict[str, Any]] = {}
@@ -437,6 +446,14 @@ def build_agent_context(
                 "resting_heart_rate_bpm", "walking_heart_rate_bpm", "hrv_sdnn_ms",
                 "respiratory_rate", "oxygen_saturation_percent", "vo2_max", "vo2_max_at",
                 "heart_rate_recovery_bpm", "heart_rate_recovery_at", "body_mass_kg", "body_mass_at",
+            )
+        },
+        "body": {
+            key: daily.get(key) if daily else None
+            for key in (
+                "body_mass_kg", "body_mass_at", "body_fat_percent", "body_fat_at",
+                "body_mass_index", "body_mass_index_at", "body_mass_index_source",
+                "lean_body_mass_kg", "lean_body_mass_at", "lean_body_mass_source",
             )
         },
         "training_summary": training,

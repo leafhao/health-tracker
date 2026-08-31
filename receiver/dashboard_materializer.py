@@ -7,9 +7,13 @@ from typing import Any
 
 from .database import Database
 from .normalizer import (
+    BODY_FAT_PERCENTAGE,
+    BODY_MASS,
+    BODY_MASS_INDEX,
     HEART_RATE,
     HEART_RATE_RECOVERY,
     HRV,
+    LEAN_BODY_MASS,
     OXYGEN_SATURATION,
     RESPIRATORY_RATE,
     RESTING_HEART_RATE,
@@ -18,7 +22,7 @@ from .normalizer import (
 )
 
 
-AVAILABILITY_SNAPSHOT = "data-availability-v1"
+AVAILABILITY_SNAPSHOT = "data-availability-v2"
 INSIGHT_DEPENDENCY_DAYS = 34
 
 
@@ -73,6 +77,10 @@ def build_data_availability(database: Database) -> dict[str, Any]:
         "vo2_max": VO2_MAX,
         "heart_rate_recovery": HEART_RATE_RECOVERY,
         "sleeping_wrist_temperature": SLEEPING_WRIST_TEMPERATURE,
+        "body_mass": BODY_MASS,
+        "body_fat_percentage": BODY_FAT_PERCENTAGE,
+        "body_mass_index": BODY_MASS_INDEX,
+        "lean_body_mass": LEAN_BODY_MASS,
     }
     placeholders = ", ".join("?" for _ in tracked)
     rows = database.fetch_all(
