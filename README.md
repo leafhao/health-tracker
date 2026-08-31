@@ -82,7 +82,7 @@ cd health-tracker
 curl http://127.0.0.1:8787/api/v1/healthbeat/ready
 ```
 
-浏览器在 Receiver 本机打开 `http://127.0.0.1:8787/dashboard`。完整运维说明见 [macOS 常驻服务](docs/macos-service-hardening.md)，已有 Receiver 迁移见 [Receiver 迁移](docs/receiver-migration.md)。
+浏览器可在 Receiver 本机打开 `http://127.0.0.1:8787/dashboard`，也可通过只对 Tailnet 开放的 Tailscale Serve HTTPS 地址远程查看；不要启用 Funnel 或把 8787 映射到公网。完整运维说明见 [macOS 常驻服务](docs/macos-service-hardening.md)，已有 Receiver 迁移见 [Receiver 迁移](docs/receiver-migration.md)。
 
 Linux 使用：
 
@@ -131,7 +131,7 @@ iOS 的后台执行时间由系统决定。App 会在冷启动入口注册 Healt
 
 - iPhone：让 App 保持后台刷新权限，不需要每天手动打开；可把 App 的“立即增量同步”快捷指令动作绑定到家、公司或 Wi-Fi 作为停靠点保底，偶尔进入首页可触发补漏并查看待上传数量。
 - Receiver：正式安装后由 Web API、规整/面板物化 Worker、云中继 Worker 三个独立进程组成；维护和备份另由定时任务执行。
-- 面板：在 Receiver 本机访问 `/dashboard`；不要把 8787 端口映射到公网。
+- 面板：在 Receiver 本机访问 `/dashboard`，或通过匹配所有者身份的 Tailscale Serve HTTPS 地址访问；不要启用 Funnel，也不要把 8787 端口映射到公网。
 - Agent：同机程序访问 `http://127.0.0.1:8787/api/v1/agent/catalog` 和相关只读接口，见 [Agent API](docs/agent-api.md)。
 
 ## Mac mini + Xcode 免费续签（推荐）

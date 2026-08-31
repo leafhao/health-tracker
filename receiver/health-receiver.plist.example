@@ -8,6 +8,7 @@
     <array>
         <string>__PROJECT_DIR__/.venv/bin/uvicorn</string>
         <string>receiver.app:app</string>
+        <string>--no-proxy-headers</string>
         <string>--host</string>
         <string>0.0.0.0</string>
         <string>--port</string>

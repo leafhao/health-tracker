@@ -56,7 +56,7 @@ openssl rand -hex 32
 ```bash
 HEALTH_RECEIVER_TOKEN_SHA256='Token的SHA-256散列' \
 HEALTH_RECEIVER_DB='/绝对路径/health.sqlite3' \
-.venv/bin/uvicorn receiver.app:app --host 0.0.0.0 --port 8787
+.venv/bin/uvicorn receiver.app:app --no-proxy-headers --host 0.0.0.0 --port 8787
 ```
 
 上面的开发启动方式会在 Web 进程内嵌后台循环，便于单命令调试。正式安装会设置
@@ -114,7 +114,7 @@ HEALTH_RECEIVER_DB='/绝对路径/health.sqlite3' \
 
 训练心率区间不会假装读取 Apple Watch 的私有区间设置：Receiver 使用近 90 天实测最高心率和近 28 天静息心率中位数计算五级心率储备区间；历史不足时自动隐藏区间，不影响其他训练信息。
 
-Receiver 监听局域网接口以便 iPhone 完成首次配对，但管理面板仍只信任 Receiver 本机访问，或来自 localhost 代理且匹配所有者的 Tailscale 身份头。局域网客户端只能访问公开身份、发起短期配对请求及加密批次接口。旧 v1 数据 API 暂时继续使用独立兼容 Token。不要配置 Tailscale Funnel，也不要将 8787 映射到公网。
+Receiver 监听局域网接口以便 iPhone 完成首次配对，但管理面板仍只信任 Receiver 本机访问，或来自 localhost 代理且匹配所有者的 Tailscale 身份头。Uvicorn 必须使用 `--no-proxy-headers`，保留 Tailscale Serve 到 Receiver 的真实本机连接来源；否则代理转发的客户端 IP 会被误当成直连请求。局域网客户端只能访问公开身份、发起短期配对请求及加密批次接口。旧 v1 数据 API 暂时继续使用独立兼容 Token。不要配置 Tailscale Funnel，也不要将 8787 映射到公网。
 
 ## 本机 Agent API
 
@@ -190,7 +190,7 @@ Bonjour 仅广播 Receiver 名称、端口和公钥标识，不携带任何秘�
 
 ## launchd 常驻
 
-复制 [health-receiver.plist.example](health-receiver.plist.example)，将其中三个 `__...__` 占位符替换为绝对路径、数据库路径和 v1 兼容凭据散列，再保存到 `~/Library/LaunchAgents/com.longfeihao.health-receiver.plist`。服务必须只监听 localhost；安装脚本会记录可信 Tailscale 登录名。另一个 [health-daily-export.plist.example](health-daily-export.plist.example) 每小时覆盖生成昨天的 JSON，以便晚到的后台数据被补入。加载前先用 `plutil -lint` 检查。
+复制 [health-receiver.plist.example](health-receiver.plist.example)，将其中三个 `__...__` 占位符替换为绝对路径、数据库路径和 v1 兼容凭据散列，再保存到 `~/Library/LaunchAgents/com.longfeihao.health-receiver.plist`。服务需要监听局域网以支持手机首次配对，但管理页只接受本机或匹配所有者的 Tailscale Serve 身份；不要删除 `--no-proxy-headers`。安装脚本会记录可信 Tailscale 登录名。另一个 [health-daily-export.plist.example](health-daily-export.plist.example) 每小时覆盖生成昨天的 JSON，以便晚到的后台数据被补入。加载前先用 `plutil -lint` 检查。
 
 ## 验证
 

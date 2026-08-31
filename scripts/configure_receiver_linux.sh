@@ -216,7 +216,7 @@ Type=simple
 EnvironmentFile=-{env_file}
 Environment={quote('HOME=' + data)}
 WorkingDirectory={quote(runtime)}
-ExecStart={quote(runtime + '/.venv/bin/uvicorn')} receiver.app:app --host 0.0.0.0 --port 8787
+ExecStart={quote(runtime + '/.venv/bin/uvicorn')} receiver.app:app --no-proxy-headers --host 0.0.0.0 --port 8787
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

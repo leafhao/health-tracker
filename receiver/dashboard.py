@@ -42,8 +42,9 @@ def _is_loopback(value: str | None) -> bool:
 def _admin_identity(request: Request) -> dict[str, str] | None:
     """Trust the local OS user or the identity asserted by Tailscale Serve.
 
-    Identity headers are accepted only from a loopback proxy. The Receiver must
-    listen on localhost so a LAN client cannot spoof them.
+    Identity headers are accepted only from a loopback proxy. Uvicorn must run
+    with proxy-header processing disabled so the socket peer remains the
+    loopback Tailscale Serve process; direct LAN clients cannot spoof this path.
     """
     client_host = request.client.host if request.client else None
     if not _is_loopback(client_host):

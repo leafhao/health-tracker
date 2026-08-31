@@ -202,7 +202,7 @@ def write(name, value):
 
 receiver = {
     "Label": "com.longfeihao.health-receiver",
-    "ProgramArguments": [f"{current}/.venv/bin/uvicorn", "receiver.app:app", "--host", "0.0.0.0", "--port", "8787"],
+    "ProgramArguments": [f"{current}/.venv/bin/uvicorn", "receiver.app:app", "--no-proxy-headers", "--host", "0.0.0.0", "--port", "8787"],
     "WorkingDirectory": current,
     "EnvironmentVariables": common_env,
     "RunAtLoad": True,

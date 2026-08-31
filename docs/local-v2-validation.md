@@ -20,7 +20,7 @@ export HEALTH_TRACKER_HOME="$PWD/.local-health-state"
 export HEALTH_RECEIVER_DB="$HEALTH_TRACKER_HOME/health.sqlite3"
 export HEALTH_RECEIVER_TOKEN_SHA256="$(`pwd`/.venv/bin/python -m receiver.cli hash-token '填入手机的原始Token')"
 .venv/bin/python -m receiver.cli v2-init --data-root "$HEALTH_TRACKER_HOME"
-.venv/bin/uvicorn receiver.app:app --host 0.0.0.0 --port 8787
+.venv/bin/uvicorn receiver.app:app --no-proxy-headers --host 0.0.0.0 --port 8787
 ```
 
 `v2-init` 输出的是 Receiver 公钥，不含私钥。服务启动后可检查：
