@@ -479,11 +479,33 @@ def mount_dashboard(
             if row.get("received_at")
         ]
         freshness = {"last_received_at": max(latest_received, default=None)}
+        batch_pipeline = database.fetch_all(
+            """SELECT MAX(created_at) AS phone_pack_created_at,
+                      MAX(committed_at) AS receiver_committed_at
+               FROM ingest_batches"""
+        )[0]
+        cloud_pipeline = database.fetch_all(
+            """SELECT MAX(first_seen_at) AS cloud_first_seen_at,
+                      MAX(processed_at) AS cloud_processed_at
+               FROM cloud_relay_objects"""
+        )[0]
+        normalized_pipeline = database.fetch_all(
+            "SELECT MAX(normalized_at) AS normalized_at FROM normalization_runs"
+        )[0]
+        materialized_pipeline = database.fetch_all(
+            "SELECT MAX(materialized_at) AS dashboard_materialized_at FROM dashboard_day_snapshots"
+        )[0]
         return {
             "version": version_payload(),
             "admin_identity": admin_identity,
             "available_dates": _available_dates(database),
             "freshness": freshness,
+            "pipeline": {
+                **batch_pipeline,
+                **cloud_pipeline,
+                **normalized_pipeline,
+                **materialized_pipeline,
+            },
             "counts": {
                 # Dashboard counters are informational. MAX(rowid) is an O(1)
                 # high-water mark and avoids rescanning a multi-gigabyte raw

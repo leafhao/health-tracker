@@ -7,6 +7,12 @@ struct CloudRelayUploadResult: Sendable {
     let deferredUntil: Date?
 }
 
+struct CloudRelayHandoffResult: Sendable {
+    let uploadedImmediately: Int
+    let scheduledInBackground: Int
+    let deferredUntil: Date?
+}
+
 private struct CloudRelayReceipt: Decodable {
     let `protocol`: String
     let deviceID: String
@@ -279,6 +285,133 @@ actor CloudRelayTransport {
             )
         )
         return pack.batches.count
+    }
+
+    /// During a real execution opportunity, first try one small stable pack
+    /// immediately. If the network is slow or temporarily unavailable, hand
+    /// the exact same signed PUT to iOS' background URLSession. This improves
+    /// freshness without making correctness depend on foreground lifetime.
+    func handoffPending(
+        outbox: EncryptedHealthOutbox,
+        pairing: HealthPairingMaterial,
+        config: CloudStorageConfig,
+        credentials: CloudStorageCredentials,
+        immediateByteLimit: Int = 1_000_000
+    ) async throws -> CloudRelayHandoffResult {
+        try validate(config: config, credentials: credentials)
+        guard config.provider == .s3 else {
+            let result = try await uploadPending(
+                outbox: outbox,
+                pairing: pairing,
+                config: config,
+                credentials: credentials
+            )
+            return CloudRelayHandoffResult(
+                uploadedImmediately: result.uploaded,
+                scheduledInBackground: 0,
+                deferredUntil: result.deferredUntil
+            )
+        }
+
+        var candidates: [PendingEncryptedBatch] = []
+        for batch in try await outbox.pending() {
+            if let marker = try await outbox.uploadMarker(for: batch),
+               marker.provider == config.provider.rawValue {
+                continue
+            }
+            candidates.append(batch)
+        }
+        guard let pack = try Self.preparePacks(candidates: candidates, stableIDs: true).first else {
+            return CloudRelayHandoffResult(
+                uploadedImmediately: 0,
+                scheduledInBackground: 0,
+                deferredUntil: nil
+            )
+        }
+
+        let body = try Self.encode(pack: pack, pairing: pairing)
+        let objectKey = Self.objectKey(config: config, pairing: pairing, pack: pack)
+        let transferID = Self.backgroundTransferID(config: config, objectKey: objectKey, pack: pack)
+        let url = try S3RequestSigner.url(config: config, objectKey: objectKey)
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.httpBody = body
+        request.timeoutInterval = 7
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try S3RequestSigner.sign(
+            request: &request,
+            body: body,
+            config: config,
+            credentials: credentials
+        )
+
+        if let (completedBody, completedResponse) = try backgroundTransfers
+            .consumeCompletedResult(transferID: transferID) {
+            try Self.validateUploadResponse(completedResponse, body: completedBody)
+            for batch in pack.batches {
+                try await outbox.markUploaded(batch, provider: .s3, objectKey: objectKey)
+            }
+            return CloudRelayHandoffResult(
+                uploadedImmediately: pack.batches.count,
+                scheduledInBackground: 0,
+                deferredUntil: nil
+            )
+        }
+
+        if body.count <= immediateByteLimit {
+            do {
+                try await waitForRequestSlot(
+                    minimumSpacing: config.usesCSTCloudCompatibility ? 1.25 : 0
+                )
+                let (responseBody, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw CloudStorageError.invalidResponse
+                }
+                try Self.validateUploadResponse(http, body: responseBody)
+                for batch in pack.batches {
+                    try await outbox.markUploaded(batch, provider: .s3, objectKey: objectKey)
+                }
+                return CloudRelayHandoffResult(
+                    uploadedImmediately: pack.batches.count,
+                    scheduledInBackground: 0,
+                    deferredUntil: nil
+                )
+            } catch CloudStorageError.rateLimited(let retryAt) {
+                rateLimitedUntil = retryAt
+                return CloudRelayHandoffResult(
+                    uploadedImmediately: 0,
+                    scheduledInBackground: 0,
+                    deferredUntil: retryAt
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as CloudStorageError {
+                switch error {
+                case .http(let status, _) where Self.isRetryable(status: status):
+                    break
+                case .invalidResponse:
+                    break
+                default:
+                    throw error
+                }
+            } catch let error as URLError {
+                guard Self.isRetryable(error: error) else { throw error }
+            } catch {
+                // A transport or 5xx failure falls through to the durable
+                // background handoff below. Stable object keys make retries safe.
+            }
+        }
+
+        try await backgroundTransfers.schedule(
+            request: request,
+            body: body,
+            transferID: transferID
+        )
+        return CloudRelayHandoffResult(
+            uploadedImmediately: 0,
+            scheduledInBackground: pack.batches.count,
+            deferredUntil: nil
+        )
     }
 
     func reconcileReceipts(

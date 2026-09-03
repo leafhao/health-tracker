@@ -612,11 +612,14 @@ actor EncryptedHealthOutbox {
 
 enum IncrementalSyncError: Error, LocalizedError {
     case tooManyAnchorPages(String)
+    case anchorPageBudgetReached(String)
 
     var errorDescription: String? {
         switch self {
         case .tooManyAnchorPages(let stream):
             return "HealthKit stream produced too many pages without reaching its current anchor: \(stream)"
+        case .anchorPageBudgetReached(let stream):
+            return "HealthKit 增量较多，已保存当前分段并等待继续：\(stream)"
         }
     }
 }

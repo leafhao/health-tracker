@@ -445,6 +445,7 @@ final class V2HealthCollector: @unchecked Sendable {
         quantityDescriptors: [QuantityTypeDescriptor],
         changedTypeIdentifiers: Set<String>? = nil,
         bootstrapCutoff: Date? = nil,
+        pageBudgetPerStream: Int = 1_000,
         pairing: HealthPairingMaterial,
         signingPrivateKey: Data
     ) async throws -> Int {
@@ -456,6 +457,7 @@ final class V2HealthCollector: @unchecked Sendable {
                 descriptor: descriptor,
                 type: type,
                 bootstrapCutoff: bootstrapCutoff,
+                pageBudget: pageBudgetPerStream,
                 pairing: pairing,
                 signingPrivateKey: signingPrivateKey
             )
@@ -466,6 +468,7 @@ final class V2HealthCollector: @unchecked Sendable {
             eventCount += try await collectSleep(
                 type: sleep,
                 bootstrapCutoff: bootstrapCutoff,
+                pageBudget: pageBudgetPerStream,
                 pairing: pairing,
                 signingPrivateKey: signingPrivateKey
             )
@@ -477,6 +480,7 @@ final class V2HealthCollector: @unchecked Sendable {
             || changedTypeIdentifiers!.contains(routeIdentifier) {
             eventCount += try await collectWorkouts(
                 bootstrapCutoff: bootstrapCutoff,
+                pageBudget: pageBudgetPerStream,
                 pairing: pairing,
                 signingPrivateKey: signingPrivateKey
             )
@@ -758,6 +762,19 @@ final class V2HealthCollector: @unchecked Sendable {
         )
     }
 
+    func handoffCloudUpload(
+        config: CloudStorageConfig,
+        credentials: CloudStorageCredentials,
+        pairing: HealthPairingMaterial
+    ) async throws -> CloudRelayHandoffResult {
+        try await cloudTransport.handoffPending(
+            outbox: outbox,
+            pairing: pairing,
+            config: config,
+            credentials: credentials
+        )
+    }
+
     func reconcileCloudReceipts(
         config: CloudStorageConfig,
         credentials: CloudStorageCredentials,
@@ -775,6 +792,7 @@ final class V2HealthCollector: @unchecked Sendable {
         descriptor: QuantityTypeDescriptor,
         type: HKQuantityType,
         bootstrapCutoff: Date?,
+        pageBudget: Int,
         pairing: HealthPairingMaterial,
         signingPrivateKey: Data
     ) async throws -> Int {
@@ -784,6 +802,7 @@ final class V2HealthCollector: @unchecked Sendable {
             type: type,
             entityType: .quantity,
             bootstrapCutoff: bootstrapCutoff,
+            pageBudget: pageBudget,
             pairing: pairing,
             signingPrivateKey: signingPrivateKey
         ) { sample in
@@ -795,6 +814,7 @@ final class V2HealthCollector: @unchecked Sendable {
     private func collectSleep(
         type: HKCategoryType,
         bootstrapCutoff: Date?,
+        pageBudget: Int,
         pairing: HealthPairingMaterial,
         signingPrivateKey: Data
     ) async throws -> Int {
@@ -805,6 +825,7 @@ final class V2HealthCollector: @unchecked Sendable {
             type: type,
             entityType: .category,
             bootstrapCutoff: bootstrapCutoff,
+            pageBudget: pageBudget,
             pairing: pairing,
             signingPrivateKey: signingPrivateKey
         ) { sample in
@@ -815,6 +836,7 @@ final class V2HealthCollector: @unchecked Sendable {
 
     private func collectWorkouts(
         bootstrapCutoff: Date?,
+        pageBudget: Int,
         pairing: HealthPairingMaterial,
         signingPrivateKey: Data
     ) async throws -> Int {
@@ -823,6 +845,7 @@ final class V2HealthCollector: @unchecked Sendable {
             type: HKObjectType.workoutType(),
             entityType: .workout,
             bootstrapCutoff: bootstrapCutoff,
+            pageBudget: pageBudget,
             pairing: pairing,
             signingPrivateKey: signingPrivateKey
         ) { [healthKit] sample in
@@ -900,6 +923,7 @@ final class V2HealthCollector: @unchecked Sendable {
         type: HKSampleType,
         entityType: HealthEntityType,
         bootstrapCutoff: Date?,
+        pageBudget: Int,
         pairing: HealthPairingMaterial,
         signingPrivateKey: Data,
         makeUpsert: @escaping (HKSample) async throws -> [HealthEvent]?
@@ -907,7 +931,7 @@ final class V2HealthCollector: @unchecked Sendable {
         var anchor = try await anchors.load(streamID: streamID)
         let isBootstrap = anchor == nil
         var total = 0
-        for _ in 0..<1_000 {
+        for _ in 0..<max(1, pageBudget) {
             let page = try await query.fetchChangesPage(for: type, anchor: anchor, limit: 500)
             var events: [HealthEvent] = []
             for sample in page.added {
@@ -932,7 +956,7 @@ final class V2HealthCollector: @unchecked Sendable {
             anchor = page.newAnchor
             if page.added.count + page.deleted.count < 500 { return total }
         }
-        throw IncrementalSyncError.tooManyAnchorPages(streamID)
+        throw IncrementalSyncError.anchorPageBudgetReached(streamID)
     }
 
     private func quantityEvent(

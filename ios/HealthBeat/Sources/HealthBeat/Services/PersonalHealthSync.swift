@@ -2,6 +2,7 @@ import CoreLocation
 import Foundation
 import HealthKit
 import Security
+import UIKit
 
 // MARK: - Configuration and secrets
 
@@ -328,6 +329,12 @@ enum SyncError: Error, LocalizedError {
 struct ShortcutSyncRequestResult: Sendable {
     let wasAlreadyPending: Bool
     let syncWasRunning: Bool
+    let executionStarted: Bool
+    let completed: Bool
+    let records: Int
+    let scheduledBatches: Int
+    let pendingBatches: Int
+    let message: String
 }
 
 enum ShortcutIncrementalSyncError: Error, LocalizedError {
@@ -380,6 +387,12 @@ final class PersonalHealthSyncService: ObservableObject {
     @Published private(set) var initialDirectCompletedBatches = 0
     @Published private(set) var initialDirectRemainingBatches = 0
     @Published private(set) var initialDirectRemainingPacks = 0
+    @Published private(set) var automationStatusMessage = "尚未收到自动化请求"
+    @Published private(set) var automationLastRequestedAt: Date?
+    @Published private(set) var automationLastFinishedAt: Date?
+    @Published private(set) var recentSyncAttempts: [HealthSyncAttempt] = []
+    @Published private(set) var diagnosticExportURL: URL?
+    @Published private(set) var staleSyncReminderEnabled = StaleHealthSyncReminder.isEnabled
     @Published var errorMessage: String?
 
     private let healthKit = HealthKitService.shared
@@ -389,8 +402,6 @@ final class PersonalHealthSyncService: ObservableObject {
     private let cloudTransport = CloudRelayTransport()
     private var observerQueries: [HKObserverQuery] = []
     private var observersStarted = false
-    private var pendingObserverTypes: Set<String> = []
-    private var pendingObserverCompletions: [() -> Void] = []
     private var observerDebounceTask: Task<Void, Never>?
     private var lastForegroundSync = Date.distantPast
 
@@ -411,10 +422,6 @@ final class PersonalHealthSyncService: ObservableObject {
     private static let bodyCompositionRepairVersionKey =
         "personalReceiver.v2.bodyCompositionRepairVersion"
     private static let bodyCompositionRepairVersion = "all-body-composition-v1"
-    private static let deferredShortcutSyncKey =
-        "personalReceiver.v2.deferredShortcutSync"
-    private static let deferredShortcutSyncRequestedAtKey =
-        "personalReceiver.v2.deferredShortcutSync.requestedAt"
     private static let shortcutDiagnosticPrefix =
         "personalReceiver.v2.shortcutDiagnostic."
 
@@ -423,8 +430,6 @@ final class PersonalHealthSyncService: ObservableObject {
         encoder.outputFormatting = [.withoutEscapingSlashes]
         return encoder
     }()
-    private var shortcutKickTask: Task<Void, Never>?
-
     private let priorityQuantityIDs: Set<String> = [
         HKQuantityTypeIdentifier.stepCount.rawValue,
         HKQuantityTypeIdentifier.distanceWalkingRunning.rawValue,
@@ -477,6 +482,8 @@ final class PersonalHealthSyncService: ObservableObject {
             forKey: Self.initialHistoryRangeConfirmedKey
         ) || storedInitialHistoryRange != nil || hasCompleteHistory || isInitialDirectBootstrapComplete
         refreshHistoricalSyncMessage()
+        refreshAutomationDiagnostics()
+        StaleHealthSyncReminder.schedule(after: lastSyncDate)
     }
 
     var currentConfig: ReceiverConfig { ReceiverConfig.load() }
@@ -516,6 +523,20 @@ final class PersonalHealthSyncService: ObservableObject {
     }
 
     func prepare() async {
+        refreshAutomationDiagnostics()
+        if UserDefaults.standard.bool(forKey: "personalReceiver.v2.deferredShortcutSync") {
+            _ = await DurableHealthSyncCoordinator.shared.request(
+                trigger: .shortcut,
+                fullScan: true
+            )
+            UserDefaults.standard.removeObject(
+                forKey: "personalReceiver.v2.deferredShortcutSync"
+            )
+            UserDefaults.standard.removeObject(
+                forKey: "personalReceiver.v2.deferredShortcutSync.requestedAt"
+            )
+        }
+        await refreshReliabilityDiagnostics()
         isV2Paired = await HealthV2PairingService.shared.isPaired
         if isV2Paired {
             receiverStatusMessage = "已完成安全配对"
@@ -723,15 +744,20 @@ final class PersonalHealthSyncService: ObservableObject {
     }
 
     func syncOnForegroundIfNeeded() async {
+        refreshAutomationDiagnostics()
+        let hasDurableWork = await DurableHealthSyncCoordinator.shared.hasPendingWork()
         guard CloudStorageConfig.load().isConfigured,
               UserDefaults.standard.bool(forKey: "personalReceiver.healthPermissionRequested"),
-              Date().timeIntervalSince(lastForegroundSync) > 15 * 60 else { return }
+              hasDurableWork || Date().timeIntervalSince(lastForegroundSync) > 15 * 60 else { return }
         lastForegroundSync = Date()
         if !isV2Paired {
             isV2Paired = await HealthV2PairingService.shared.isPaired
         }
         if isV2Paired {
-            await syncIncrementalEncrypted(allowHistoricalBackfill: false)
+            _ = await enqueueAndRunDurableSync(
+                trigger: .foreground,
+                fullScan: !hasDurableWork
+            )
         } else {
             statusMessage = "请先在设置中完成端到端加密配对"
         }
@@ -744,35 +770,30 @@ final class PersonalHealthSyncService: ObservableObject {
               isV2Paired,
               UserDefaults.standard.bool(forKey: "personalReceiver.healthPermissionRequested")
         else { return false }
-        let defaults = UserDefaults.standard
-        let requestedAt = defaults.object(
-            forKey: Self.deferredShortcutSyncRequestedAtKey
-        ) as? Date
-        await syncIncrementalEncrypted(allowHistoricalBackfill: false)
-        let success = errorMessage == nil && !Task.isCancelled
-        if success,
-           defaults.bool(forKey: Self.deferredShortcutSyncKey),
-           (requestedAt == nil || requestedAt == defaults.object(
-               forKey: Self.deferredShortcutSyncRequestedAtKey
-           ) as? Date) {
-            defaults.removeObject(forKey: Self.deferredShortcutSyncKey)
-            defaults.removeObject(forKey: Self.deferredShortcutSyncRequestedAtKey)
-            defaults.set("completed", forKey: Self.shortcutDiagnosticPrefix + "state")
-            defaults.set(Date(), forKey: Self.shortcutDiagnosticPrefix + "finishedAt")
-            defaults.set(uploadedRecords, forKey: Self.shortcutDiagnosticPrefix + "records")
-            defaults.set(pendingBatches, forKey: Self.shortcutDiagnosticPrefix + "pendingBatches")
-            V2BackgroundSyncCoordinator.shared.scheduleNext()
-        } else if defaults.bool(forKey: Self.deferredShortcutSyncKey) {
-            defaults.set("waiting", forKey: Self.shortcutDiagnosticPrefix + "state")
-            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
-        }
-        return success
+        let result = await enqueueAndRunDurableSync(
+            trigger: .backgroundRefresh,
+            fullScan: true
+        )
+        return result.completed && !Task.isCancelled
     }
 
-    /// Shortcuts is a durable trigger, not a synchronization executor. Persist
-    /// the request and return immediately; the app consumes it with whatever
-    /// execution time iOS grants now or during a later background refresh.
-    func requestShortcutIncrementalSync() throws -> ShortcutSyncRequestResult {
+    /// Retry only an automation request that was deferred because HealthKit
+    /// protected data was unavailable. This avoids turning every device unlock
+    /// into an unconditional health synchronization.
+    func retryDeferredShortcutSyncAfterUnlock() async {
+        guard await DurableHealthSyncCoordinator.shared.hasPendingWork() else { return }
+        _ = await enqueueAndRunDurableSync(
+            trigger: .protectedDataAvailable,
+            fullScan: false
+        )
+    }
+
+    /// A Shortcut invocation is already an execution opportunity. Use it to
+    /// perform a bounded anchored read and hand one stable S3 pack to the
+    /// system background URLSession before returning. The durable request is
+    /// retained whenever protected data, time, or networking prevents that
+    /// handoff, so BG refresh and foreground entry can still finish the work.
+    func requestShortcutIncrementalSync() async throws -> ShortcutSyncRequestResult {
         registerBackgroundObserversAtLaunch()
         guard UserDefaults.standard.bool(
             forKey: "personalReceiver.healthPermissionRequested"
@@ -786,92 +807,356 @@ final class PersonalHealthSyncService: ObservableObject {
         guard cloud.isConfigured else {
             throw ShortcutIncrementalSyncError.cloudNotConfigured
         }
-        let defaults = UserDefaults.standard
-        let wasAlreadyPending = defaults.bool(forKey: Self.deferredShortcutSyncKey)
-        let now = Date()
-        defaults.set(true, forKey: Self.deferredShortcutSyncKey)
-        defaults.set(now, forKey: Self.deferredShortcutSyncRequestedAtKey)
-        defaults.set("queued", forKey: Self.shortcutDiagnosticPrefix + "state")
-        defaults.set(now, forKey: Self.shortcutDiagnosticPrefix + "requestedAt")
-        defaults.removeObject(forKey: Self.shortcutDiagnosticPrefix + "errorDomain")
-        defaults.removeObject(forKey: Self.shortcutDiagnosticPrefix + "errorCode")
-        defaults.removeObject(forKey: Self.shortcutDiagnosticPrefix + "errorDescription")
-        statusMessage = isSyncing
-            ? "同步请求已记录；当前任务结束后继续"
-            : "同步请求已提交，等待 App 后台执行"
+        return await enqueueAndRunDurableSync(trigger: .shortcut, fullScan: true)
+    }
 
-        // This is the durable guarantee. iOS chooses the actual launch time.
-        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 1)
-
-        // Best effort only: once AppIntent returns its result, use any process
-        // time iOS keeps available. The persisted request remains if suspended.
-        if !isSyncing, shortcutKickTask == nil {
-            shortcutKickTask = Task { @MainActor [weak self] in
-                await Task.yield()
-                guard let self else { return }
-                _ = await self.performBackgroundRefresh()
-                self.shortcutKickTask = nil
-            }
+    func requestWorkoutEndedSync() async throws -> ShortcutSyncRequestResult {
+        guard UserDefaults.standard.bool(
+            forKey: "personalReceiver.healthPermissionRequested"
+        ) else { throw ShortcutIncrementalSyncError.healthPermissionRequired }
+        guard isInitialDirectBootstrapComplete else {
+            throw ShortcutIncrementalSyncError.initialSyncIncomplete
         }
-        return ShortcutSyncRequestResult(
-            wasAlreadyPending: wasAlreadyPending,
-            syncWasRunning: isSyncing
+        guard CloudStorageConfig.load().isConfigured else {
+            throw ShortcutIncrementalSyncError.cloudNotConfigured
+        }
+        return await enqueueAndRunDurableSync(
+            trigger: .workoutShortcut,
+            fullScan: true,
+            workoutRecheckAfter: 10 * 60
         )
     }
 
-    /// HealthKit background delivery has a short execution budget. Read only
-    /// the changed anchored streams, persist encrypted batches, and hand one
-    /// stable S3 pack to the system URLSession. Receipt reconciliation and the
-    /// remaining queue are handled by BGAppRefresh or the next foreground run.
-    private func syncFromHealthObserver(
-        changedTypeIdentifiers: Set<String>
-    ) async {
-        guard !changedTypeIdentifiers.isEmpty,
-              isInitialDirectBootstrapComplete,
-              CloudStorageConfig.load().isConfigured,
-              UserDefaults.standard.bool(
-                  forKey: "personalReceiver.healthPermissionRequested"
-              ),
-              !isSyncing else {
-            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
-            return
+    func requestManualIncrementalSync() async {
+        _ = await enqueueAndRunDurableSync(trigger: .manual, fullScan: true)
+    }
+
+    func setStaleSyncReminderEnabled(_ enabled: Bool) async {
+        staleSyncReminderEnabled = await StaleHealthSyncReminder.setEnabled(
+            enabled,
+            lastSuccessfulSync: lastSyncDate
+        )
+        if enabled && !staleSyncReminderEnabled {
+            errorMessage = "通知权限未开启，无法启用同步超时提醒。"
         }
+    }
+
+    func refreshReliabilityDiagnostics() async {
+        recentSyncAttempts = await HealthSyncAttemptJournal.shared.recent()
+        diagnosticExportURL = await HealthSyncAttemptJournal.shared.exportURL()
+    }
+
+    private func enqueueAndRunDurableSync(
+        trigger: HealthSyncTrigger,
+        dirtyTypes: Set<String> = [],
+        fullScan: Bool,
+        workoutRecheckAfter: TimeInterval? = nil
+    ) async -> ShortcutSyncRequestResult {
+        let coordinator = DurableHealthSyncCoordinator.shared
+        let wasAlreadyPending = await coordinator.hasPendingWork()
+        _ = await coordinator.request(
+            trigger: trigger,
+            dirtyTypes: dirtyTypes,
+            fullScan: fullScan,
+            workoutRecheckAfter: workoutRecheckAfter
+        )
+        let defaults = UserDefaults.standard
+        if trigger == .shortcut || trigger == .workoutShortcut {
+            let now = Date()
+            defaults.set("queued", forKey: Self.shortcutDiagnosticPrefix + "state")
+            defaults.set(now, forKey: Self.shortcutDiagnosticPrefix + "requestedAt")
+            defaults.removeObject(forKey: Self.shortcutDiagnosticPrefix + "errorDescription")
+            refreshAutomationDiagnostics()
+        }
+        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
+
+        guard !isSyncing else {
+            let mergedAttemptID = await HealthSyncAttemptJournal.shared.begin(
+                trigger: trigger,
+                appState: Self.currentApplicationState,
+                protectedDataAvailable: UIApplication.shared.isProtectedDataAvailable,
+                lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+                dirtyTypeCount: dirtyTypes.count
+            )
+            await HealthSyncAttemptJournal.shared.mark(
+                mergedAttemptID,
+                stage: .merged,
+                pendingBatches: (try? await v2Collector.pendingBatchCount()) ?? pendingBatches,
+                finished: true
+            )
+            await refreshReliabilityDiagnostics()
+            return ShortcutSyncRequestResult(
+                wasAlreadyPending: wasAlreadyPending,
+                syncWasRunning: true,
+                executionStarted: false,
+                completed: false,
+                records: 0,
+                scheduledBatches: 0,
+                pendingBatches: (try? await v2Collector.pendingBatchCount()) ?? pendingBatches,
+                message: "已有同步正在运行；本次请求已合并并持久化。"
+            )
+        }
+        guard isInitialDirectBootstrapComplete,
+              let work = await coordinator.claim() else {
+            return ShortcutSyncRequestResult(
+                wasAlreadyPending: wasAlreadyPending,
+                syncWasRunning: false,
+                executionStarted: false,
+                completed: false,
+                records: 0,
+                scheduledBatches: 0,
+                pendingBatches: pendingBatches,
+                message: "首次历史同步完成后才会启动后台增量同步。"
+            )
+        }
+
+        let primaryTrigger = work.triggers.contains(trigger)
+            ? trigger
+            : (work.triggers.sorted { $0.rawValue < $1.rawValue }.first ?? trigger)
+        let attemptID = await HealthSyncAttemptJournal.shared.begin(
+            trigger: primaryTrigger,
+            appState: Self.currentApplicationState,
+            protectedDataAvailable: UIApplication.shared.isProtectedDataAvailable,
+            lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            dirtyTypeCount: work.dirtyTypeIdentifiers.count
+        )
         isSyncing = true
         uploadedRecords = 0
         errorMessage = nil
-        defer { finishSyncAndScheduleDeferredShortcut() }
+        if primaryTrigger == .shortcut || primaryTrigger == .workoutShortcut {
+            defaults.set("running", forKey: Self.shortcutDiagnosticPrefix + "state")
+            refreshAutomationDiagnostics()
+        }
+
+        guard UIApplication.shared.isProtectedDataAvailable else {
+            await coordinator.finish(work, success: false)
+            await HealthSyncAttemptJournal.shared.mark(
+                attemptID,
+                stage: .waitingForUnlock,
+                pendingBatches: pendingBatches,
+                finished: true
+            )
+            isSyncing = false
+            statusMessage = "手机仍处于锁定状态；同步请求已保留，解锁后继续。"
+            if primaryTrigger == .shortcut || primaryTrigger == .workoutShortcut {
+                defaults.set("waiting-for-unlock", forKey: Self.shortcutDiagnosticPrefix + "state")
+                refreshAutomationDiagnostics()
+            }
+            await refreshReliabilityDiagnostics()
+            return ShortcutSyncRequestResult(
+                wasAlreadyPending: wasAlreadyPending,
+                syncWasRunning: false,
+                executionStarted: true,
+                completed: false,
+                records: 0,
+                scheduledBatches: 0,
+                pendingBatches: pendingBatches,
+                message: statusMessage
+            )
+        }
+
         do {
             isV2Paired = await HealthV2PairingService.shared.isPaired
-            guard isV2Paired else { throw HealthV2PairingError.unavailable }
+            guard isV2Paired else { throw ShortcutIncrementalSyncError.pairingRequired }
             let pairing = try await HealthV2PairingService.shared.load()
-            let cutoff = Date()
-            uploadedRecords = try await v2Collector.collect(
-                quantityDescriptors: quantityDescriptors,
-                changedTypeIdentifiers: changedTypeIdentifiers,
-                bootstrapCutoff: cutoff,
-                pairing: pairing.material,
-                signingPrivateKey: pairing.signingPrivateKey
-            )
             let cloud = CloudStorageConfig.load()
-            if cloud.provider == .s3 {
-                _ = try await v2Collector.scheduleCloudUpload(
+            if cloud.provider == .s3,
+               primaryTrigger != .healthObserver,
+               primaryTrigger != .shortcut,
+               primaryTrigger != .workoutShortcut {
+                // Receipt cleanup is deliberately outside the HealthKit
+                // observer's short callback window and never blocks collection.
+                _ = try? await v2Collector.reconcileCloudReceipts(
                     config: cloud,
                     credentials: CloudStorageCredentials.load(for: .s3),
                     pairing: pairing.material
                 )
-                lastEndpoint = cloud.provider.displayName
-                statusMessage = "健康变化已加密并交给 iOS 后台上传"
-            } else {
-                statusMessage = "健康变化已加密保存，等待后台刷新上传"
             }
+            await HealthSyncAttemptJournal.shared.mark(attemptID, stage: .collecting)
+            uploadedRecords = try await v2Collector.collect(
+                quantityDescriptors: quantityDescriptors,
+                changedTypeIdentifiers: work.requiresFullScan ? nil : work.dirtyTypeIdentifiers,
+                bootstrapCutoff: Date(),
+                pageBudgetPerStream: 4,
+                pairing: pairing.material,
+                signingPrivateKey: pairing.signingPrivateKey
+            )
+            pendingBatches = try await v2Collector.pendingBatchCount()
+            await HealthSyncAttemptJournal.shared.mark(
+                attemptID,
+                stage: .encryptedLocally,
+                recordsCollected: uploadedRecords,
+                pendingBatches: pendingBatches
+            )
+
+            let handoff = try await v2Collector.handoffCloudUpload(
+                config: cloud,
+                credentials: CloudStorageCredentials.load(for: cloud.provider),
+                pairing: pairing.material
+            )
+            let handedOff = handoff.uploadedImmediately + handoff.scheduledInBackground
             pendingBatches = try await v2Collector.pendingBatchCount()
             await refreshCloudStatus()
-            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
+            await coordinator.finish(work, success: true)
+
+            let finishedAt = Date()
+            lastSyncDate = finishedAt
+            defaults.set(finishedAt, forKey: "personalReceiver.lastSyncDate")
+            StaleHealthSyncReminder.schedule(after: finishedAt)
+            if primaryTrigger == .shortcut || primaryTrigger == .workoutShortcut {
+                defaults.set("completed", forKey: Self.shortcutDiagnosticPrefix + "state")
+                defaults.set(finishedAt, forKey: Self.shortcutDiagnosticPrefix + "finishedAt")
+                defaults.set(uploadedRecords, forKey: Self.shortcutDiagnosticPrefix + "records")
+                defaults.set(handedOff, forKey: Self.shortcutDiagnosticPrefix + "scheduledBatches")
+                defaults.set(pendingBatches, forKey: Self.shortcutDiagnosticPrefix + "pendingBatches")
+                refreshAutomationDiagnostics()
+            }
+            let stage: HealthSyncAttemptStage = handoff.scheduledInBackground > 0
+                ? .handedToBackground : .completed
+            await HealthSyncAttemptJournal.shared.mark(
+                attemptID,
+                stage: stage,
+                recordsCollected: uploadedRecords,
+                scheduledBatches: handedOff,
+                pendingBatches: pendingBatches,
+                finished: true
+            )
+
+            if let retryAt = handoff.deferredUntil, retryAt > Date() {
+                let delay = max(60, retryAt.timeIntervalSinceNow)
+                V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: delay)
+                statusMessage = "健康增量已加密保存；云端限流，稍后自动续传。"
+            } else {
+                let nextDelay: TimeInterval
+                if await coordinator.hasPendingWork() {
+                    nextDelay = 60
+                } else if awaitingCloudUpload > 0 {
+                    nextDelay = 5 * 60
+                } else if let recheckAt = await coordinator.nextWorkoutRecheckDate() {
+                    nextDelay = max(60, recheckAt.timeIntervalSinceNow)
+                } else {
+                    nextDelay = 60 * 60
+                }
+                V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: nextDelay)
+                statusMessage = handedOff > 0
+                    ? "已处理 \(uploadedRecords) 条变化，并完成可靠上传交接。"
+                    : "增量检查完成；没有新包需要上传。"
+            }
+            isSyncing = false
+            if await coordinator.hasPendingWork() {
+                scheduleObserverDrain(after: 2)
+            }
+            await refreshReliabilityDiagnostics()
+            return ShortcutSyncRequestResult(
+                wasAlreadyPending: wasAlreadyPending,
+                syncWasRunning: false,
+                executionStarted: true,
+                completed: true,
+                records: uploadedRecords,
+                scheduledBatches: handedOff,
+                pendingBatches: pendingBatches,
+                message: statusMessage
+            )
+        } catch IncrementalSyncError.anchorPageBudgetReached(let streamID) {
+            await coordinator.finish(work, success: false)
+            pendingBatches = (try? await v2Collector.pendingBatchCount()) ?? pendingBatches
+            errorMessage = nil
+            statusMessage = "健康增量较多，已保存一段并将在下次继续。"
+            await HealthSyncAttemptJournal.shared.mark(
+                attemptID,
+                stage: .encryptedLocally,
+                recordsCollected: uploadedRecords,
+                pendingBatches: pendingBatches,
+                finished: true
+            )
+            if primaryTrigger == .shortcut || primaryTrigger == .workoutShortcut {
+                defaults.set("waiting", forKey: Self.shortcutDiagnosticPrefix + "state")
+                defaults.set(
+                    "增量积压正在分段处理：\(streamID)",
+                    forKey: Self.shortcutDiagnosticPrefix + "errorDescription"
+                )
+                refreshAutomationDiagnostics()
+            }
+            isSyncing = false
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
+            await refreshReliabilityDiagnostics()
+            return ShortcutSyncRequestResult(
+                wasAlreadyPending: wasAlreadyPending,
+                syncWasRunning: false,
+                executionStarted: true,
+                completed: false,
+                records: uploadedRecords,
+                scheduledBatches: 0,
+                pendingBatches: pendingBatches,
+                message: statusMessage
+            )
         } catch {
+            await coordinator.finish(work, success: false)
             pendingBatches = (try? await v2Collector.pendingBatchCount()) ?? pendingBatches
             errorMessage = error.localizedDescription
-            statusMessage = "后台采集已保留，等待系统再次唤醒"
-            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
+            statusMessage = "同步未完成；请求与本地密文已保留等待重试。"
+            await HealthSyncAttemptJournal.shared.mark(
+                attemptID,
+                stage: .failed,
+                recordsCollected: uploadedRecords,
+                pendingBatches: pendingBatches,
+                error: error,
+                finished: true
+            )
+            if primaryTrigger == .shortcut || primaryTrigger == .workoutShortcut {
+                defaults.set("waiting", forKey: Self.shortcutDiagnosticPrefix + "state")
+                defaults.set(error.localizedDescription, forKey: Self.shortcutDiagnosticPrefix + "errorDescription")
+                refreshAutomationDiagnostics()
+            }
+            isSyncing = false
+            V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
+            await refreshReliabilityDiagnostics()
+            return ShortcutSyncRequestResult(
+                wasAlreadyPending: wasAlreadyPending,
+                syncWasRunning: false,
+                executionStarted: true,
+                completed: false,
+                records: uploadedRecords,
+                scheduledBatches: 0,
+                pendingBatches: pendingBatches,
+                message: "本次未能完成：\(error.localizedDescription)。请求已经保留。"
+            )
+        }
+    }
+
+    private static var currentApplicationState: String {
+        switch UIApplication.shared.applicationState {
+        case .active: return "active"
+        case .inactive: return "inactive"
+        case .background: return "background"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func refreshAutomationDiagnostics() {
+        let defaults = UserDefaults.standard
+        automationLastRequestedAt = defaults.object(
+            forKey: Self.shortcutDiagnosticPrefix + "requestedAt"
+        ) as? Date
+        automationLastFinishedAt = defaults.object(
+            forKey: Self.shortcutDiagnosticPrefix + "finishedAt"
+        ) as? Date
+        let state = defaults.string(forKey: Self.shortcutDiagnosticPrefix + "state")
+        let records = defaults.integer(forKey: Self.shortcutDiagnosticPrefix + "records")
+        let scheduled = defaults.integer(
+            forKey: Self.shortcutDiagnosticPrefix + "scheduledBatches"
+        )
+        let detail = defaults.string(
+            forKey: Self.shortcutDiagnosticPrefix + "errorDescription"
+        )
+        switch state {
+        case "queued": automationStatusMessage = "已收到请求，准备执行"
+        case "running": automationStatusMessage = "正在读取并加密健康增量"
+        case "waiting-for-unlock": automationStatusMessage = "等待手机解锁后补传"
+        case "waiting": automationStatusMessage = detail.map { "等待重试：\($0)" } ?? "等待系统再次唤醒"
+        case "completed":
+            automationStatusMessage = "已处理 \(records) 条变化 · 后台交接 \(scheduled) 批次"
+        default: automationStatusMessage = "尚未收到自动化请求"
         }
     }
 
@@ -978,6 +1263,7 @@ final class PersonalHealthSyncService: ObservableObject {
             }
             lastSyncDate = Date()
             UserDefaults.standard.set(lastSyncDate, forKey: "personalReceiver.lastSyncDate")
+            StaleHealthSyncReminder.schedule(after: lastSyncDate)
             statusMessage = needsHistoricalBackfill
                 ? "增量同步完成；首次历史回溯尚未完成"
                 : "加密同步完成，共处理 \(uploadedRecords) 条记录"
@@ -989,19 +1275,15 @@ final class PersonalHealthSyncService: ObservableObject {
             errorMessage = error.localizedDescription
             statusMessage = "加密同步未完成，密文已保留等待重试"
         }
-        if !pendingObserverTypes.isEmpty {
-            scheduleObserverDrain(after: 1)
-        }
     }
 
     private func finishSyncAndScheduleDeferredShortcut() {
         isSyncing = false
-        guard UserDefaults.standard.bool(forKey: Self.deferredShortcutSyncKey) else {
-            return
+        Task {
+            if await DurableHealthSyncCoordinator.shared.hasPendingWork() {
+                V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
+            }
         }
-        // Keep the durable request until a later background pass succeeds.
-        // Never recurse into synchronization from a finishing defer block.
-        V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
     }
 
     private func performInitialDirectBootstrap(
@@ -1073,6 +1355,7 @@ final class PersonalHealthSyncService: ObservableObject {
             initialDirectRemainingPacks = 0
             lastSyncDate = Date()
             UserDefaults.standard.set(lastSyncDate, forKey: "personalReceiver.lastSyncDate")
+            StaleHealthSyncReminder.schedule(after: lastSyncDate)
             statusMessage = "首次历史直传完成；后续增量将通过云存储同步"
         } else if needsHistoricalBackfill {
             statusMessage = "局域网密文已同步；打开 App 后可继续首次历史回溯"
@@ -1493,28 +1776,36 @@ final class PersonalHealthSyncService: ObservableObject {
     private func startObservers() {
         guard !observersStarted else { return }
         observersStarted = true
-        for case let sampleType as HKSampleType in readTypes {
-            let query = HKObserverQuery(sampleType: sampleType, predicate: nil) { [weak self] _, completion, error in
-                guard error == nil else {
-                    completion()
-                    return
-                }
-                Task { @MainActor in
-                    guard let self else {
-                        completion()
-                        return
-                    }
-                    // isV2Paired is UI memory and is false on a cold background
-                    // launch. The sync path reloads the Keychain-backed pairing.
-                    if CloudStorageConfig.load().isConfigured {
-                        self.enqueueObserverChange(typeIdentifier: sampleType.identifier, completion: completion)
-                    } else {
-                        completion()
-                    }
-                }
+        let sampleTypes = readTypes.compactMap { $0 as? HKSampleType }
+        let descriptors = sampleTypes.map { HKQueryDescriptor(sampleType: $0, predicate: nil) }
+        let query = HKObserverQuery(queryDescriptors: descriptors) { [weak self] _, changedTypes, completion, error in
+            guard error == nil, let self else {
+                completion()
+                return
             }
-            healthKit.store.execute(query)
-            observerQueries.append(query)
+            let identifiers = Set((changedTypes ?? []).map(\.identifier))
+            guard !identifiers.isEmpty, CloudStorageConfig.load().isConfigured else {
+                completion()
+                return
+            }
+            Task { @MainActor in
+                // Acknowledge HealthKit immediately after the trigger has been
+                // persisted. The longer read/encrypt/upload path runs separately.
+                await DurableHealthSyncCoordinator.shared.request(
+                    trigger: .healthObserver,
+                    dirtyTypes: identifiers,
+                    workoutRecheckAfter: identifiers.contains(
+                        HKObjectType.workoutType().identifier
+                    ) ? 10 * 60 : nil
+                )
+                completion()
+                self.scheduleObserverDrain(after: 2)
+            }
+        }
+        healthKit.store.execute(query)
+        observerQueries.append(query)
+
+        for sampleType in sampleTypes {
             healthKit.store.enableBackgroundDelivery(
                 for: sampleType,
                 frequency: .immediate
@@ -1537,12 +1828,6 @@ final class PersonalHealthSyncService: ObservableObject {
         }
     }
 
-    private func enqueueObserverChange(typeIdentifier: String, completion: @escaping () -> Void) {
-        pendingObserverTypes.insert(typeIdentifier)
-        pendingObserverCompletions.append(completion)
-        scheduleObserverDrain(after: 2)
-    }
-
     private func scheduleObserverDrain(after seconds: TimeInterval) {
         observerDebounceTask?.cancel()
         observerDebounceTask = Task { @MainActor [weak self] in
@@ -1553,22 +1838,13 @@ final class PersonalHealthSyncService: ObservableObject {
             }
             guard let self else { return }
             if self.isSyncing {
-                // Never hold HealthKit's delivery acknowledgement behind an
-                // unrelated foreground sync. Anchors remain unchanged, so the
-                // queued type is safely collected on the next pass.
-                let completions = self.pendingObserverCompletions
-                self.pendingObserverCompletions.removeAll()
-                completions.forEach { $0() }
                 V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 5 * 60)
-                self.scheduleObserverDrain(after: 3)
                 return
             }
-            let types = self.pendingObserverTypes
-            let completions = self.pendingObserverCompletions
-            self.pendingObserverTypes.removeAll()
-            self.pendingObserverCompletions.removeAll()
-            await self.syncFromHealthObserver(changedTypeIdentifiers: types)
-            completions.forEach { $0() }
+            _ = await self.enqueueAndRunDurableSync(
+                trigger: .healthObserver,
+                fullScan: false
+            )
         }
     }
 

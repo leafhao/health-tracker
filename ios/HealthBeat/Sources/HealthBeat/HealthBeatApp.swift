@@ -25,6 +25,15 @@ final class HealthBeatAppDelegate: NSObject, UIApplicationDelegate {
             completionHandler: completionHandler
         )
     }
+
+    func applicationProtectedDataDidBecomeAvailable(_ application: UIApplication) {
+        // Location, Wi-Fi, or charger automations can arrive while the phone is
+        // locked, when HealthKit cannot be read. If the process remains alive,
+        // consume the durable request as soon as the user unlocks the device.
+        Task { @MainActor in
+            await PersonalHealthSyncService.shared.retryDeferredShortcutSyncAfterUnlock()
+        }
+    }
 }
 
 @main

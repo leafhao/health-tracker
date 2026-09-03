@@ -490,6 +490,8 @@ class NormalizerTests(unittest.TestCase):
         self.assertIn("近 30 天有效 · 低频长期指标", local_dashboard.text)
         self.assertIn("function smoothSeries", local_dashboard.text)
         self.assertIn("function installChartInteraction", local_dashboard.text)
+        self.assertIn('id="syncPipeline"', local_dashboard.text)
+        self.assertIn("function renderSyncPipeline", local_dashboard.text)
         self.assertIn("平滑趋势", local_dashboard.text)
         self.assertIn('id="bodyPanel"', local_dashboard.text)
         self.assertNotIn("metric('体重'", local_dashboard.text)
@@ -498,6 +500,17 @@ class NormalizerTests(unittest.TestCase):
         self.assertEqual(
             dashboard_status.json()["version"]["product_version"],
             "0.1.0-beta.1",
+        )
+        self.assertEqual(
+            set(dashboard_status.json()["pipeline"]),
+            {
+                "phone_pack_created_at",
+                "cloud_first_seen_at",
+                "cloud_processed_at",
+                "receiver_committed_at",
+                "normalized_at",
+                "dashboard_materialized_at",
+            },
         )
         pairing = self.client.post("/api/v2/admin/pairing-sessions")
         self.assertEqual(pairing.status_code, 200)

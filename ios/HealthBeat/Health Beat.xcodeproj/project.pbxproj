@@ -31,6 +31,7 @@
 		AABB00000000000000020055 /* CloudStorageConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABB00000000000000010053 /* CloudStorageConfig.swift */; };
 		AABB00000000000000020056 /* CloudRelayTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABB00000000000000010054 /* CloudRelayTransport.swift */; };
 		AABB00000000000000020057 /* IncrementalHealthSyncIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABB00000000000000010055 /* IncrementalHealthSyncIntent.swift */; };
+		AABB00000000000000020058 /* SyncReliability.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABB00000000000000010056 /* SyncReliability.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -116,6 +117,7 @@
 		AABB00000000000000010053 /* CloudStorageConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudStorageConfig.swift; sourceTree = "<group>"; };
 		AABB00000000000000010054 /* CloudRelayTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudRelayTransport.swift; sourceTree = "<group>"; };
 		AABB00000000000000010055 /* IncrementalHealthSyncIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncrementalHealthSyncIntent.swift; sourceTree = "<group>"; };
+		AABB00000000000000010056 /* SyncReliability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncReliability.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -207,6 +209,7 @@
 				AABB00000000000000010051 /* V2HealthCollector.swift */,
 				AABB00000000000000010052 /* V2BackgroundSync.swift */,
 				AABB00000000000000010054 /* CloudRelayTransport.swift */,
+				AABB00000000000000010056 /* SyncReliability.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -447,6 +450,7 @@
 				AABB00000000000000020055 /* CloudStorageConfig.swift in Sources */,
 				AABB00000000000000020056 /* CloudRelayTransport.swift in Sources */,
 				AABB00000000000000020057 /* IncrementalHealthSyncIntent.swift in Sources */,
+				AABB00000000000000020058 /* SyncReliability.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

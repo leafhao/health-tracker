@@ -151,7 +151,7 @@ private struct SyncHomeView: View {
                        !sync.isInitialHistoryRangeConfirmed {
                         openAppSettings()
                     } else {
-                        Task { await sync.syncIncrementalEncrypted() }
+                        Task { await sync.requestManualIncrementalSync() }
                     }
                 } label: {
                     HStack {
@@ -381,6 +381,75 @@ private struct HealthSyncSettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     Text("后台增量同步由 HealthKit 变化唤醒、系统后台刷新和进入前台补漏共同完成。iOS 决定实际运行时机，因此这些机制不是可精确调整的定时配置。")
                         .font(.footnote).foregroundStyle(.secondary)
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("快捷指令自动化")
+                            .font(.headline)
+                        Text(sync.automationStatusMessage)
+                            .font(.subheadline)
+                        if let requestedAt = sync.automationLastRequestedAt {
+                            Text("最近触发：\(requestedAt.formatted(date: .abbreviated, time: .standard))")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let finishedAt = sync.automationLastFinishedAt {
+                            Text("最近完成：\(finishedAt.formatted(date: .abbreviated, time: .standard))")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("快捷指令触发后会当场读取增量并把密文包交给系统后台上传；如果手机锁定或执行时间不足，请求会保留并在下次可运行时重试。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("可靠性与诊断") {
+                    Toggle(
+                        "超过 24 小时未同步时提醒",
+                        isOn: Binding(
+                            get: { sync.staleSyncReminderEnabled },
+                            set: { enabled in
+                                Task { await sync.setStaleSyncReminderEnabled(enabled) }
+                            }
+                        )
+                    )
+                    Text("提醒只在长期没有完成健康增量读取时出现；点击通知打开 App 即可补传。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if sync.recentSyncAttempts.isEmpty {
+                        Text("还没有同步流水记录。新版运行一次后会在这里显示触发来源和执行阶段。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(sync.recentSyncAttempts.prefix(6)) { attempt in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(attempt.trigger.displayName).font(.subheadline).bold()
+                                    Spacer()
+                                    Text(attempt.stage.displayName)
+                                        .font(.caption)
+                                        .foregroundStyle(attempt.stage == .failed ? .red : .secondary)
+                                }
+                                Text(attempt.requestedAt.formatted(date: .abbreviated, time: .standard))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("采集 \(attempt.recordsCollected) 条 · 后台交接 \(attempt.scheduledBatches) 批 · 本地待处理 \(attempt.pendingBatches)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                if let detail = attempt.errorDescription {
+                                    Text(detail).font(.caption).foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                    }
+                    Button("刷新同步诊断") {
+                        Task { await sync.refreshReliabilityDiagnostics() }
+                    }
+                    if let url = sync.diagnosticExportURL {
+                        ShareLink(item: url) {
+                            Label("导出同步诊断 JSON", systemImage: "square.and.arrow.up")
+                        }
+                    }
                 }
 
                 Section {
