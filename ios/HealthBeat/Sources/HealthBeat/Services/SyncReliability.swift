@@ -86,7 +86,30 @@ actor HealthSyncAttemptJournal {
         fileURL = base.appending(path: "sync-attempts.json")
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        records = (try? Data(contentsOf: fileURL)).flatMap { try? decoder.decode([HealthSyncAttempt].self, from: $0) } ?? []
+        let now = Date()
+        records = ((try? Data(contentsOf: fileURL)).flatMap {
+            try? decoder.decode([HealthSyncAttempt].self, from: $0)
+        } ?? []).map { record in
+            var recovered = record
+            if recovered.finishedAt == nil,
+               now.timeIntervalSince(recovered.requestedAt) >= 15 * 60 {
+                recovered.stage = .failed
+                recovered.finishedAt = now
+                var timestamps = recovered.stageTimestamps ?? [:]
+                timestamps[HealthSyncAttemptStage.failed.rawValue] = now
+                recovered.stageTimestamps = timestamps
+                recovered.errorDomain = "HealthTracker.SyncLease"
+                recovered.errorCode = 1
+                recovered.errorDescription = "同步被系统中断，任务已自动重新排队"
+            }
+            return recovered
+        }
+        if let data = try? encoder.encode(records) {
+            try? data.write(
+                to: fileURL,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+            )
+        }
     }
 
     func begin(
@@ -166,6 +189,8 @@ struct DurableHealthSyncWork: Codable, Sendable {
     let id: UUID
     let generation: UInt64
     let requestedAt: Date
+    /// Lease start is optional so state written by earlier app versions still decodes.
+    let claimedAt: Date?
     let triggers: Set<HealthSyncTrigger>
     let dirtyTypeIdentifiers: Set<String>
     let requiresFullScan: Bool
@@ -244,6 +269,26 @@ actor DurableHealthSyncCoordinator {
         state.pendingSince != nil || state.inFlight != nil || (state.workoutRecheckNotBefore.map { $0 <= now } ?? false)
     }
 
+    /// iOS can suspend an async task between durable collection and network
+    /// handoff without cancelling it. Requeue an expired lease so a later
+    /// foreground/background opportunity is not permanently merged into it.
+    @discardableResult
+    func recoverExpiredLease(now: Date = Date(), maximumAge: TimeInterval = 15 * 60) -> Bool {
+        guard let abandoned = state.inFlight else { return false }
+        let leaseStartedAt = abandoned.claimedAt ?? abandoned.requestedAt
+        guard now.timeIntervalSince(leaseStartedAt) >= maximumAge else { return false }
+        state.pendingSince = min(
+            state.pendingSince ?? abandoned.requestedAt,
+            abandoned.requestedAt
+        )
+        state.pendingTriggers.formUnion(abandoned.triggers)
+        state.dirtyTypeIdentifiers.formUnion(abandoned.dirtyTypeIdentifiers)
+        state.requiresFullScan = state.requiresFullScan || abandoned.requiresFullScan
+        state.inFlight = nil
+        save()
+        return true
+    }
+
     func claim(now: Date = Date()) -> DurableHealthSyncWork? {
         if let inFlight = state.inFlight { return inFlight }
         if let due = state.workoutRecheckNotBefore, due <= now {
@@ -257,6 +302,7 @@ actor DurableHealthSyncCoordinator {
             id: UUID(),
             generation: state.nextGeneration,
             requestedAt: requestedAt,
+            claimedAt: now,
             triggers: state.pendingTriggers,
             dirtyTypeIdentifiers: state.dirtyTypeIdentifiers,
             requiresFullScan: state.requiresFullScan

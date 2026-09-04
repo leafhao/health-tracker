@@ -765,26 +765,30 @@ final class V2HealthCollector: @unchecked Sendable {
     func handoffCloudUpload(
         config: CloudStorageConfig,
         credentials: CloudStorageCredentials,
-        pairing: HealthPairingMaterial
+        pairing: HealthPairingMaterial,
+        allowImmediateUpload: Bool = true
     ) async throws -> CloudRelayHandoffResult {
         try await cloudTransport.handoffPending(
             outbox: outbox,
             pairing: pairing,
             config: config,
-            credentials: credentials
+            credentials: credentials,
+            allowImmediateUpload: allowImmediateUpload
         )
     }
 
     func reconcileCloudReceipts(
         config: CloudStorageConfig,
         credentials: CloudStorageCredentials,
-        pairing: HealthPairingMaterial
+        pairing: HealthPairingMaterial,
+        maximumReceipts: Int = 20
     ) async throws -> Int {
         try await cloudTransport.reconcileReceipts(
             outbox: outbox,
             pairing: pairing,
             config: config,
-            credentials: credentials
+            credentials: credentials,
+            maximumReceipts: maximumReceipts
         )
     }
 

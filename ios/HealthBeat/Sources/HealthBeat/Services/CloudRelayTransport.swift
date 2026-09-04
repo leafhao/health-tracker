@@ -296,7 +296,8 @@ actor CloudRelayTransport {
         pairing: HealthPairingMaterial,
         config: CloudStorageConfig,
         credentials: CloudStorageCredentials,
-        immediateByteLimit: Int = 1_000_000
+        immediateByteLimit: Int = 1_000_000,
+        allowImmediateUpload: Bool = true
     ) async throws -> CloudRelayHandoffResult {
         try validate(config: config, credentials: credentials)
         guard config.provider == .s3 else {
@@ -358,7 +359,7 @@ actor CloudRelayTransport {
             )
         }
 
-        if body.count <= immediateByteLimit {
+        if allowImmediateUpload, body.count <= immediateByteLimit {
             do {
                 try await waitForRequestSlot(
                     minimumSpacing: config.usesCSTCloudCompatibility ? 1.25 : 0
@@ -418,7 +419,8 @@ actor CloudRelayTransport {
         outbox: EncryptedHealthOutbox,
         pairing: HealthPairingMaterial,
         config: CloudStorageConfig,
-        credentials: CloudStorageCredentials
+        credentials: CloudStorageCredentials,
+        maximumReceipts: Int = 20
     ) async throws -> Int {
         try validate(config: config, credentials: credentials)
         guard config.provider == .s3 else { return 0 }
@@ -426,7 +428,8 @@ actor CloudRelayTransport {
             outbox: outbox,
             pairing: pairing,
             config: config,
-            credentials: credentials
+            credentials: credentials,
+            maximumReceipts: maximumReceipts
         )
     }
 
@@ -434,7 +437,8 @@ actor CloudRelayTransport {
         outbox: EncryptedHealthOutbox,
         pairing: HealthPairingMaterial,
         config: CloudStorageConfig,
-        credentials: CloudStorageCredentials
+        credentials: CloudStorageCredentials,
+        maximumReceipts: Int
     ) async throws -> Int {
         let receiptDirectory = (config.prefix.split(separator: "/").map(String.init)
             + ["receipts", pairing.deviceID]).joined(separator: "/")
@@ -446,7 +450,7 @@ actor CloudRelayTransport {
         var confirmed = 0
         var processedReceipts = 0
         var firstError: Error?
-        for objectKey in uploadedObjectKeys.prefix(20) {
+        for objectKey in uploadedObjectKeys.prefix(max(1, maximumReceipts)) {
             do {
                 let filename = String(objectKey.split(separator: "/").last ?? "")
                 guard filename.hasSuffix(".hpack") else { continue }

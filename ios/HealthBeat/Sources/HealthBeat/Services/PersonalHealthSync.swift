@@ -399,6 +399,8 @@ final class PersonalHealthSyncService: ObservableObject {
     private let queue = UploadQueue()
     private let client = ReceiverClient()
     private let v2Collector = V2HealthCollector()
+    private var durableSyncStartedAt: Date?
+    private var activeDurableWorkID: UUID?
     private let cloudTransport = CloudRelayTransport()
     private var observerQueries: [HKObserverQuery] = []
     private var observersStarted = false
@@ -853,6 +855,16 @@ final class PersonalHealthSyncService: ObservableObject {
         workoutRecheckAfter: TimeInterval? = nil
     ) async -> ShortcutSyncRequestResult {
         let coordinator = DurableHealthSyncCoordinator.shared
+        let recoveredExpiredLease = await coordinator.recoverExpiredLease()
+        if recoveredExpiredLease,
+           let startedAt = durableSyncStartedAt,
+           Date().timeIntervalSince(startedAt) >= 15 * 60 {
+            // The previous task was suspended beyond its lease. Its durable
+            // payload is already in the outbox, so a fresh execution may take over.
+            activeDurableWorkID = nil
+            durableSyncStartedAt = nil
+            isSyncing = false
+        }
         let wasAlreadyPending = await coordinator.hasPendingWork()
         _ = await coordinator.request(
             trigger: trigger,
@@ -921,6 +933,9 @@ final class PersonalHealthSyncService: ObservableObject {
             dirtyTypeCount: work.dirtyTypeIdentifiers.count
         )
         isSyncing = true
+        durableSyncStartedAt = Date()
+        activeDurableWorkID = work.id
+        defer { releaseDurableExecution(work.id) }
         uploadedRecords = 0
         errorMessage = nil
         if primaryTrigger == .shortcut || primaryTrigger == .workoutShortcut {
@@ -936,7 +951,6 @@ final class PersonalHealthSyncService: ObservableObject {
                 pendingBatches: pendingBatches,
                 finished: true
             )
-            isSyncing = false
             statusMessage = "手机仍处于锁定状态；同步请求已保留，解锁后继续。"
             if primaryTrigger == .shortcut || primaryTrigger == .workoutShortcut {
                 defaults.set("waiting-for-unlock", forKey: Self.shortcutDiagnosticPrefix + "state")
@@ -960,18 +974,6 @@ final class PersonalHealthSyncService: ObservableObject {
             guard isV2Paired else { throw ShortcutIncrementalSyncError.pairingRequired }
             let pairing = try await HealthV2PairingService.shared.load()
             let cloud = CloudStorageConfig.load()
-            if cloud.provider == .s3,
-               primaryTrigger != .healthObserver,
-               primaryTrigger != .shortcut,
-               primaryTrigger != .workoutShortcut {
-                // Receipt cleanup is deliberately outside the HealthKit
-                // observer's short callback window and never blocks collection.
-                _ = try? await v2Collector.reconcileCloudReceipts(
-                    config: cloud,
-                    credentials: CloudStorageCredentials.load(for: .s3),
-                    pairing: pairing.material
-                )
-            }
             await HealthSyncAttemptJournal.shared.mark(attemptID, stage: .collecting)
             uploadedRecords = try await v2Collector.collect(
                 quantityDescriptors: quantityDescriptors,
@@ -989,16 +991,33 @@ final class PersonalHealthSyncService: ObservableObject {
                 pendingBatches: pendingBatches
             )
 
+            // HealthKit anchors and encrypted envelopes are now durable. End
+            // the collection lease before any network await so suspension
+            // cannot leave future triggers permanently attached to this work.
+            await coordinator.finish(work, success: true)
+
+            if cloud.provider == .s3 {
+                // Every execution opportunity cleans a small number of old
+                // receipts. Keep background/automation runs bounded to avoid
+                // CSTCloud request bursts and iOS suspension mid-cleanup.
+                let receiptBudget = UIApplication.shared.applicationState == .active ? 4 : 1
+                _ = try? await v2Collector.reconcileCloudReceipts(
+                    config: cloud,
+                    credentials: CloudStorageCredentials.load(for: .s3),
+                    pairing: pairing.material,
+                    maximumReceipts: receiptBudget
+                )
+            }
+
             let handoff = try await v2Collector.handoffCloudUpload(
                 config: cloud,
                 credentials: CloudStorageCredentials.load(for: cloud.provider),
-                pairing: pairing.material
+                pairing: pairing.material,
+                allowImmediateUpload: UIApplication.shared.applicationState == .active
             )
             let handedOff = handoff.uploadedImmediately + handoff.scheduledInBackground
             pendingBatches = try await v2Collector.pendingBatchCount()
             await refreshCloudStatus()
-            await coordinator.finish(work, success: true)
-
             let finishedAt = Date()
             lastSyncDate = finishedAt
             defaults.set(finishedAt, forKey: "personalReceiver.lastSyncDate")
@@ -1042,7 +1061,6 @@ final class PersonalHealthSyncService: ObservableObject {
                     ? "已处理 \(uploadedRecords) 条变化，并完成可靠上传交接。"
                     : "增量检查完成；没有新包需要上传。"
             }
-            isSyncing = false
             if await coordinator.hasPendingWork() {
                 scheduleObserverDrain(after: 2)
             }
@@ -1077,7 +1095,6 @@ final class PersonalHealthSyncService: ObservableObject {
                 )
                 refreshAutomationDiagnostics()
             }
-            isSyncing = false
             V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
             await refreshReliabilityDiagnostics()
             return ShortcutSyncRequestResult(
@@ -1108,7 +1125,6 @@ final class PersonalHealthSyncService: ObservableObject {
                 defaults.set(error.localizedDescription, forKey: Self.shortcutDiagnosticPrefix + "errorDescription")
                 refreshAutomationDiagnostics()
             }
-            isSyncing = false
             V2BackgroundSyncCoordinator.shared.scheduleNext(earliest: 60)
             await refreshReliabilityDiagnostics()
             return ShortcutSyncRequestResult(
@@ -1122,6 +1138,13 @@ final class PersonalHealthSyncService: ObservableObject {
                 message: "本次未能完成：\(error.localizedDescription)。请求已经保留。"
             )
         }
+    }
+
+    private func releaseDurableExecution(_ workID: UUID) {
+        guard activeDurableWorkID == workID else { return }
+        activeDurableWorkID = nil
+        durableSyncStartedAt = nil
+        isSyncing = false
     }
 
     private static var currentApplicationState: String {
